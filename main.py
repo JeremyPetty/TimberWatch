@@ -5,7 +5,6 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 
 DATABASE_URL = os.environ["DATABASE_URL"]
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "changeme")
 
 app = FastAPI()
 
@@ -43,12 +42,14 @@ def search(
 
     results = []
     error = ""
+
     dashboard = {
         "documents": 0,
         "motions": 0,
         "failed_motions": 0,
         "abstentions": 0,
-        "topics": []
+        "topics": [],
+        "trustees": []
     }
 
     try:
@@ -87,18 +88,28 @@ def search(
                 """)
                 dashboard["topics"] = cur.fetchall()
 
-                if q or source or document_type or start_date or end_date or trustee:
-                    where_parts = [
-                        """
-                        (
-                            search_vector @@ plainto_tsquery('english', %s)
-                            OR name ILIKE %s
-                            OR text_content ILIKE %s
-                        )
-                        """
-                    ]
+                cur.execute("""
+                    SELECT DISTINCT trustee_name
+                    FROM trustee_votes
+                    WHERE trustee_name IS NOT NULL
+                      AND trustee_name <> ''
+                    ORDER BY trustee_name
+                """)
+                dashboard["trustees"] = cur.fetchall()
 
-                    params = [q, f"%{q}%", f"%{q}%"]
+                if q or source or document_type or start_date or end_date:
+                    where_parts = []
+                    params = []
+
+                    if q:
+                        where_parts.append("""
+                            (
+                                search_vector @@ plainto_tsquery('english', %s)
+                                OR name ILIKE %s
+                                OR text_content ILIKE %s
+                            )
+                        """)
+                        params.extend([q, f"%{q}%", f"%{q}%"])
 
                     if source:
                         where_parts.append("source = %s")
@@ -116,6 +127,10 @@ def search(
                         where_parts.append("meeting_date <= %s")
                         params.append(end_date)
 
+                    where_sql = " AND ".join(where_parts) if where_parts else "TRUE"
+
+                    search_query_for_rank = q if q else ""
+
                     sql = f"""
                         SELECT
                             source,
@@ -126,18 +141,21 @@ def search(
                             meeting_date,
                             document_type,
                             source_url,
-                            ts_rank(
-                                search_vector,
-                                plainto_tsquery('english', %s)
-                            ) AS rank,
-                            ts_headline(
-                                'english',
-                                coalesce(text_content, ''),
-                                plainto_tsquery('english', %s),
-                                'StartSel=<mark>, StopSel=</mark>, MaxFragments=2, MaxWords=55, MinWords=15'
-                            ) AS match_context
+                            CASE
+                                WHEN %s = '' THEN 0
+                                ELSE ts_rank(search_vector, plainto_tsquery('english', %s))
+                            END AS rank,
+                            CASE
+                                WHEN %s = '' THEN coalesce(left(text_content, 350), '')
+                                ELSE ts_headline(
+                                    'english',
+                                    coalesce(text_content, ''),
+                                    plainto_tsquery('english', %s),
+                                    'StartSel=<mark>, StopSel=</mark>, MaxFragments=2, MaxWords=55, MinWords=15'
+                                )
+                            END AS match_context
                         FROM documents
-                        WHERE {" AND ".join(where_parts)}
+                        WHERE {where_sql}
                         ORDER BY
                             rank DESC,
                             meeting_date DESC NULLS LAST,
@@ -145,415 +163,301 @@ def search(
                         LIMIT 100
                     """
 
-                    final_params = [q, q] + params
+                    final_params = [
+                        search_query_for_rank,
+                        search_query_for_rank,
+                        search_query_for_rank,
+                        search_query_for_rank
+                    ] + params
+
                     cur.execute(sql, final_params)
                     results = cur.fetchall()
 
     except Exception as e:
         error = str(e)
------Edit
-html_out = f"""
-<html>
-<head>
-    <title>TimberWatch</title>
 
-    <style>
+    html_out = f"""
+    <html>
+    <head>
+        <title>TimberWatch</title>
+        <style>
+            body {{
+                font-family: Arial, sans-serif;
+                margin: 30px;
+                background: #fafafa;
+            }}
 
-        body {{
-            font-family: Arial, sans-serif;
-            margin: 30px;
-            background:#fafafa;
-        }}
+            input, select {{
+                padding: 8px;
+                font-size: 14px;
+                margin: 4px;
+            }}
 
-        input, select {{
-            padding: 8px;
-            font-size: 14px;
-            margin: 4px;
-        }}
+            button {{
+                padding: 8px 12px;
+            }}
 
-        button {{
-            padding: 8px 12px;
-        }}
+            table {{
+                border-collapse: collapse;
+                width: 100%;
+                margin-top: 20px;
+                background: white;
+            }}
 
-        table {{
-            border-collapse: collapse;
-            width: 100%;
-            margin-top: 20px;
-            background:white;
-        }}
+            th, td {{
+                border: 1px solid #ddd;
+                padding: 8px;
+                vertical-align: top;
+            }}
 
-        th, td {{
-            border: 1px solid #ddd;
-            padding: 8px;
-            vertical-align: top;
-        }}
+            th {{
+                background: #f2f2f2;
+            }}
 
-        th {{
-            background: #f2f2f2;
-        }}
+            mark {{
+                background: yellow;
+                font-weight: bold;
+            }}
 
-        mark {{
-            background: yellow;
-            font-weight: bold;
-        }}
+            .small {{
+                font-size: 13px;
+                color: #555;
+            }}
 
-        .small {{
-            font-size: 13px;
-            color: #555;
-        }}
+            .cards {{
+                display: flex;
+                gap: 12px;
+                flex-wrap: wrap;
+                margin-bottom: 20px;
+            }}
 
-        .cards {{
-            display:flex;
-            gap:12px;
-            flex-wrap:wrap;
-            margin-bottom:20px;
-        }}
+            .card {{
+                background: white;
+                border: 1px solid #ddd;
+                border-radius: 8px;
+                padding: 14px;
+                min-width: 150px;
+                text-decoration: none;
+                color: black;
+            }}
 
-        .card {{
-            background:white;
-            border:1px solid #ddd;
-            border-radius:8px;
-            padding:14px;
-            min-width:150px;
-            text-decoration:none;
-            color:black;
-        }}
+            .card:hover {{
+                background: #f0f6ff;
+            }}
 
-        .card:hover {{
-            background:#f0f6ff;
-        }}
+            .card .num {{
+                font-size: 24px;
+                font-weight: bold;
+            }}
 
-        .card .num {{
-            font-size:24px;
-            font-weight:bold;
-        }}
+            .filters {{
+                background: white;
+                border: 1px solid #ddd;
+                border-radius: 8px;
+                padding: 12px;
+            }}
 
-        .filters {{
-            background:white;
-            border:1px solid #ddd;
-            border-radius:8px;
-            padding:12px;
-        }}
+            .topic-pill {{
+                display: inline-block;
+                background: #e8eef7;
+                padding: 5px 8px;
+                border-radius: 12px;
+                margin: 3px;
+                text-decoration: none;
+                color: black;
+            }}
 
-        .topic-pill {{
-            display:inline-block;
-            background:#e8eef7;
-            padding:5px 8px;
-            border-radius:12px;
-            margin:3px;
-            text-decoration:none;
-            color:black;
-        }}
+            .topic-pill:hover {{
+                background: #d5e6ff;
+            }}
+        </style>
+    </head>
 
-        .topic-pill:hover {{
-            background:#d5e6ff;
-        }}
+    <body>
+        <h1>TimberWatch</h1>
 
-    </style>
-
-</head>
-
-<body>
-
-<h1>TimberWatch</h1>
-
-<div class="cards">
-
-    <a class="card" href="/search?view=documents">
-        <div class="num">{dashboard["documents"]}</div>
-        <div>Total Documents</div>
-    </a>
-
-    <a class="card" href="/search?view=motions">
-        <div class="num">{dashboard["motions"]}</div>
-        <div>Total Motions</div>
-    </a>
-
-    <a class="card" href="/search?view=failed">
-        <div class="num">{dashboard["failed_motions"]}</div>
-        <div>Failed / Nay Motions</div>
-    </a>
-
-    <a class="card" href="/search?view=abstentions">
-        <div class="num">{dashboard["abstentions"]}</div>
-        <div>Abstentions</div>
-    </a>
-
-</div>
-
-<div class="card">
-
-    <b>Top Motion Topics</b><br>
-"""
-
-if dashboard["topics"]:
-
-    for topic, count in dashboard["topics"]:
-
-        html_out += f"""
-            <a class='topic-pill'
-               href="/search?q={esc(topic)}">
-                {esc(topic)}: {count}
+        <div class="cards">
+            <a class="card" href="/search?view=documents">
+                <div class="num">{dashboard["documents"]}</div>
+                <div>Total Documents</div>
             </a>
-        """
 
-else:
+            <a class="card" href="/search?view=motions">
+                <div class="num">{dashboard["motions"]}</div>
+                <div>Total Motions</div>
+            </a>
 
-    html_out += """
-        <span class='small'>
-            No motion topics indexed yet.
-        </span>
+            <a class="card" href="/search?view=failed">
+                <div class="num">{dashboard["failed_motions"]}</div>
+                <div>Failed / Nay Motions</div>
+            </a>
+
+            <a class="card" href="/search?view=abstentions">
+                <div class="num">{dashboard["abstentions"]}</div>
+                <div>Abstentions</div>
+            </a>
+        </div>
+
+        <div class="card">
+            <b>Top Motion Topics</b><br>
     """
 
-html_out += """
-</div>
-
-<br>
-
-<div class="card">
-
-    <b>Trustees</b><br>
-"""
-
-if dashboard.get("trustees"):
-
-    for trustee_name, in dashboard["trustees"]:
-
-        html_out += f"""
-            <a class="topic-pill"
-               href="/search?trustee={esc(trustee_name)}">
-                {esc(trustee_name)}
-            </a>
-        """
-
-else:
+    if dashboard["topics"]:
+        for topic, count in dashboard["topics"]:
+            html_out += f"""
+                <a class="topic-pill" href="/search?q={esc(topic)}">
+                    {esc(topic)}: {count}
+                </a>
+            """
+    else:
+        html_out += "<span class='small'>No motion topics indexed yet.</span>"
 
     html_out += """
-        <span class='small'>
-            No trustee votes indexed yet.
-        </span>
+        </div>
+
+        <br>
+
+        <div class="card">
+            <b>Trustees</b><br>
     """
 
-html_out += f"""
-</div>
-
-<br>
-
-<form class="filters" action="/search" method="get">
-
-    <input
-        name="q"
-        value="{esc(q)}"
-        placeholder="Search documents..."
-        style="width:360px;"
-    >
-
-    <select name="source">
-
-        <option value="">All Sources</option>
-
-        <option value="Board Documents"
-            {"selected" if source == "Board Documents" else ""}>
-            Board Documents
-        </option>
-
-        <option value="BP/AP/AR"
-            {"selected" if source == "BP/AP/AR" else ""}>
-            BP/AP/AR
-        </option>
-
-    </select>
-
-    <select name="document_type">
-
-        <option value="">All Document Types</option>
-
-        <option value="Minutes"
-            {"selected" if document_type == "Minutes" else ""}>
-            Minutes
-        </option>
-
-        <option value="Agenda"
-            {"selected" if document_type == "Agenda" else ""}>
-            Agenda
-        </option>
-
-        <option value="Board Policy"
-            {"selected" if document_type == "Board Policy" else ""}>
-            Board Policy
-        </option>
-
-        <option value="Administrative Procedure"
-            {"selected" if document_type == "Administrative Procedure" else ""}>
-            Administrative Procedure
-        </option>
-
-        <option value="Other"
-            {"selected" if document_type == "Other" else ""}>
-            Other
-        </option>
-
-    </select>
-
-    <input
-        type="date"
-        name="start_date"
-        value="{esc(start_date)}"
-    >
-
-    <input
-        type="date"
-        name="end_date"
-        value="{esc(end_date)}"
-    >
-
-    <button type="submit">
-        Search
-    </button>
-
-    <a href="/" style="margin-left:10px;">
-        Clear
-    </a>
-
-</form>
-
-<p>
-    <a href="/status">Status</a>
-</p>
-
-<hr>
-"""
-
-if error:
+    if dashboard["trustees"]:
+        for trustee_name, in dashboard["trustees"]:
+            html_out += f"""
+                <a class="topic-pill" href="/search?trustee={esc(trustee_name)}">
+                    {esc(trustee_name)}
+                </a>
+            """
+    else:
+        html_out += "<span class='small'>No trustee votes indexed yet.</span>"
 
     html_out += f"""
-        <p style='color:red;'>
-            <b>Error:</b> {esc(error)}
-        </p>
+        </div>
+
+        <br>
+
+        <form class="filters" action="/search" method="get">
+            <input
+                name="q"
+                value="{esc(q)}"
+                placeholder="Search documents..."
+                style="width:360px;"
+            >
+
+            <select name="source">
+                <option value="">All Sources</option>
+                <option value="Board Documents" {"selected" if source == "Board Documents" else ""}>
+                    Board Documents
+                </option>
+                <option value="BP/AP/AR" {"selected" if source == "BP/AP/AR" else ""}>
+                    BP/AP/AR
+                </option>
+            </select>
+
+            <select name="document_type">
+                <option value="">All Document Types</option>
+                <option value="Minutes" {"selected" if document_type == "Minutes" else ""}>
+                    Minutes
+                </option>
+                <option value="Agenda" {"selected" if document_type == "Agenda" else ""}>
+                    Agenda
+                </option>
+                <option value="Board Policy" {"selected" if document_type == "Board Policy" else ""}>
+                    Board Policy
+                </option>
+                <option value="Administrative Procedure" {"selected" if document_type == "Administrative Procedure" else ""}>
+                    Administrative Procedure
+                </option>
+                <option value="Other" {"selected" if document_type == "Other" else ""}>
+                    Other
+                </option>
+            </select>
+
+            <input type="date" name="start_date" value="{esc(start_date)}">
+            <input type="date" name="end_date" value="{esc(end_date)}">
+
+            <button type="submit">Search</button>
+            <a href="/" style="margin-left:10px;">Clear</a>
+        </form>
+
+        <p><a href="/status">Status</a></p>
+        <hr>
     """
 
-if (q or source or document_type or start_date or end_date) and not results and not error:
+    if error:
+        html_out += f"<p style='color:red;'><b>Error:</b> {esc(error)}</p>"
 
-    html_out += "<p>No results found.</p>"
+    if (q or source or document_type or start_date or end_date) and not results and not error:
+        html_out += "<p>No results found.</p>"
 
-if results:
-
-    html_out += f"""
-        <p>
-            <b>{len(results)}</b> results found.
-        </p>
-    """
-
-    html_out += """
-    <table>
-
-        <tr>
-            <th>Document</th>
-            <th>Source</th>
-            <th>Type</th>
-            <th>Meeting Date</th>
-            <th>Created</th>
-            <th>Modified</th>
-            <th>Rank</th>
-            <th>Matching Text</th>
-            <th>Actions</th>
-        </tr>
-    """
-
-    for row in results:
-
-        (
-            row_source,
-            name,
-            url,
-            created,
-            modified,
-            meeting_date,
-            row_document_type,
-            source_url,
-            rank,
-            match_context
-        ) = row
-
-        open_url = source_url or url or ""
-
-        html_out += f"""
-        <tr>
-
-            <td><b>{esc(name)}</b></td>
-
-            <td>{esc(row_source)}</td>
-
-            <td>{esc(row_document_type)}</td>
-
-            <td>{esc(meeting_date)}</td>
-
-            <td>{esc(created)}</td>
-
-            <td>{esc(modified)}</td>
-
-            <td>{round(rank or 0, 4)}</td>
-
-            <td>{match_context or ""}</td>
-
-            <td>
-                <a href="{esc(open_url)}" target="_blank">
-                    Open Original PDF
-                </a>
-
-                <br>
-
-                <a href="{esc(open_url)}" download>
-                    Download
-                </a>
-            </td>
-
-        </tr>
+    if results:
+        html_out += f"<p><b>{len(results)}</b> results found.</p>"
+        html_out += """
+        <table>
+            <tr>
+                <th>Document</th>
+                <th>Source</th>
+                <th>Type</th>
+                <th>Meeting Date</th>
+                <th>Created</th>
+                <th>Modified</th>
+                <th>Rank</th>
+                <th>Matching Text</th>
+                <th>Actions</th>
+            </tr>
         """
 
-    html_out += "</table>"
+        for row in results:
+            (
+                row_source,
+                name,
+                url,
+                created,
+                modified,
+                meeting_date,
+                row_document_type,
+                source_url,
+                rank,
+                match_context
+            ) = row
 
-html_out += """
-<br>
+            open_url = source_url or url or ""
 
-<div class="card">
+            html_out += f"""
+            <tr>
+                <td><b>{esc(name)}</b></td>
+                <td>{esc(row_source)}</td>
+                <td>{esc(row_document_type)}</td>
+                <td>{esc(meeting_date)}</td>
+                <td>{esc(created)}</td>
+                <td>{esc(modified)}</td>
+                <td>{round(rank or 0, 4)}</td>
+                <td>{match_context or ""}</td>
+                <td>
+                    <a href="{esc(open_url)}" target="_blank">Open Original PDF</a><br>
+                    <a href="{esc(open_url)}" download>Download</a>
+                </td>
+            </tr>
+            """
 
-    <h3>Definitions</h3>
+        html_out += "</table>"
 
-    <p>
-        <b>Total Documents:</b>
-        Number of indexed PDFs/documents currently in TimberWatch.
-    </p>
+    html_out += """
+        <br>
 
-    <p>
-        <b>Total Motions:</b>
-        Motions extracted from board minutes.
-    </p>
+        <div class="card">
+            <h3>Definitions</h3>
 
-    <p>
-        <b>Failed / Nay Motions:</b>
-        Motions containing failed or negative vote language.
-    </p>
+            <p><b>Total Documents:</b> Number of indexed PDFs/documents currently in TimberWatch.</p>
+            <p><b>Total Motions:</b> Motions extracted from board minutes.</p>
+            <p><b>Failed / Nay Motions:</b> Motions containing failed or negative vote language.</p>
+            <p><b>Abstentions:</b> Trustee votes detected as abstentions.</p>
+            <p><b>Rank Score:</b> PostgreSQL relevance score. Higher usually means the search terms matched more strongly.</p>
+            <p><b>Matching Text:</b> Highlighted text from the source document.</p>
+        </div>
 
-    <p>
-        <b>Abstentions:</b>
-        Trustee votes detected as abstentions.
-    </p>
+    </body>
+    </html>
+    """
 
-    <p>
-        <b>Rank Score:</b>
-        PostgreSQL relevance score.
-    </p>
-
-    <p>
-        <b>Matching Text:</b>
-        Highlighted text from the source document.
-    </p>
-
-</div>
-
-</body>
-</html>
-"""
-
-return html_out
+    return html_out
