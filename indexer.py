@@ -281,43 +281,49 @@ def index_source(source_name, api_url):
                 document_type = classify_document_type(name, text_content)
                 source_url = full_url
 
-                cur.execute("""
-                    INSERT INTO documents (
-                        source, name, url, server_relative_url,
-                        created, modified, size, text_content,
-                        indexed_at, search_vector, meeting_date,
-                        document_type, source_url
-                    )
-                    VALUES (
-                        %s, %s, %s, %s,
-                        %s, %s, %s, %s,
-                        %s,
-                        to_tsvector('english', unaccent(coalesce(%s,'') || ' ' || coalesce(%s,''))),
-                        %s, %s, %s
-                    )
-                    ON CONFLICT (url) DO UPDATE SET
-                        source = EXCLUDED.source,
-                        name = EXCLUDED.name,
-                        server_relative_url = EXCLUDED.server_relative_url,
-                        created = EXCLUDED.created,
-                        modified = EXCLUDED.modified,
-                        size = EXCLUDED.size,
-                        text_content = EXCLUDED.text_content,
-                        indexed_at = EXCLUDED.indexed_at,
-                        search_vector = EXCLUDED.search_vector,
-                        meeting_date = EXCLUDED.meeting_date,
-                        document_type = EXCLUDED.document_type,
-                        source_url = EXCLUDED.source_url
-                    RETURNING id
-                """, (
-                    source_name, name, full_url, server_url,
+            cur.execute("""
+                INSERT INTO documents (
+                    source, name, url, server_relative_url,
                     created, modified, size, text_content,
-                    datetime.utcnow(),
-                    name, text_content,
-                    meeting_date, document_type, source_url
-                ))
+                    indexed_at, search_vector, meeting_date,
+                    document_type, source_url
+                )
+                VALUES (
+                    %s, %s, %s, %s,
+                    %s, %s, %s, %s,
+                    %s,
+                    to_tsvector('english', unaccent(coalesce(%s,'') || ' ' || coalesce(%s,''))),
+                    %s, %s, %s
+                )
+                ON CONFLICT (url) DO UPDATE SET
+                    source = EXCLUDED.source,
+                    name = EXCLUDED.name,
+                    server_relative_url = EXCLUDED.server_relative_url,
+                    created = EXCLUDED.created,
+                    modified = EXCLUDED.modified,
+                    size = EXCLUDED.size,
+                    text_content = EXCLUDED.text_content,
+                    indexed_at = EXCLUDED.indexed_at,
+                    search_vector = EXCLUDED.search_vector,
+                    meeting_date = EXCLUDED.meeting_date,
+                    document_type = EXCLUDED.document_type,
+                    source_url = EXCLUDED.source_url
+                RETURNING id
+            """, (
+                source_name, name, full_url, server_url,
+                created, modified, size, text_content,
+                datetime.utcnow(),
+                name, text_content,
+                meeting_date, document_type, source_url
+            ))
 
-            document_id = cur.fetchone()[0]
+            document_id_row = cur.fetchone()
+
+            if not document_id_row:
+                print(f"WARNING: No document id returned for {name}", flush=True)
+                continue
+
+            document_id = document_id_row[0]
             
         cur.execute("""
             DELETE FROM motions
