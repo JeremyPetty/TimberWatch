@@ -317,22 +317,22 @@ def index_source(source_name, api_url):
                 meeting_date, document_type, source_url
             ))
 
-            document_id_row = cur.fetchone()
+        document_id_row = cur.fetchone()
 
             if not document_id_row:
                 print(f"WARNING: No document id returned for {name}", flush=True)
                 continue
 
-            document_id = document_id_row[0]
+        document_id = document_id_row[0]
             
         cur.execute("""
             DELETE FROM motions
             WHERE document_id = %s
         """, (document_id,))
             
-            motions = extract_motions(text_content)
+        motions = extract_motions(text_content)
 
-            for motion in motions:
+        for motion in motions:
                 cur.execute("""
                     INSERT INTO motions (
                         document_id,
