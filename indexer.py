@@ -318,7 +318,12 @@ def index_source(source_name, api_url):
                 ))
 
             document_id = cur.fetchone()[0]
-                
+            
+        cur.execute("""
+            DELETE FROM motions
+            WHERE document_id = %s
+        """, (document_id,))
+            
             motions = extract_motions(text_content)
 
             for motion in motions:
