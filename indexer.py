@@ -240,7 +240,9 @@ def index_source(source_name, api_url):
 
     with get_conn() as conn:
         with conn.cursor() as cur:
+
             for item in files:
+
                 name = item.get("Name", "")
                 server_url = item.get("ServerRelativeUrl", "")
                 full_url = SITE_ROOT + quote(server_url, safe="/:-_.()'")
@@ -253,6 +255,7 @@ def index_source(source_name, api_url):
                     FROM documents
                     WHERE url = %s
                 """, (full_url,))
+
                 existing = cur.fetchone()
 
                 if existing and str(existing[0]) == str(modified) and existing[1] == size:
@@ -262,93 +265,157 @@ def index_source(source_name, api_url):
                 text_content = ""
 
                 if name.lower().endswith(".pdf"):
+
                     try:
                         print(f"Indexing PDF: {name}", flush=True)
-                        pdf_response = requests.get(full_url, headers=HEADERS, timeout=120)
+
+                        pdf_response = requests.get(
+                            full_url,
+                            headers=HEADERS,
+                            timeout=120
+                        )
+
                         pdf_response.raise_for_status()
-                        text_content = clean_text_for_postgres(extract_pdf_text(pdf_response.content))
+
+                        text_content = extract_pdf_text(
+                            pdf_response.content
+                        )
+
                     except Exception as e:
-                        print(f"FAILED PDF: {name} | {full_url} | {e}", flush=True)
+                        print(
+                            f"FAILED PDF: {name} | {full_url} | {e}",
+                            flush=True
+                        )
+
                         text_content = ""
 
-                source_name = clean_text_for_postgres(source_name)
-                name = clean_text_for_postgres(name)
-                full_url = clean_text_for_postgres(full_url)
-                server_url = clean_text_for_postgres(server_url)
-                text_content = clean_text_for_postgres(text_content)
+                source_clean = clean_text_for_postgres(source_name)
+                name_clean = clean_text_for_postgres(name)
+                full_url_clean = clean_text_for_postgres(full_url)
+                server_url_clean = clean_text_for_postgres(server_url)
+                text_content_clean = clean_text_for_postgres(text_content)
 
-                meeting_date = extract_meeting_date(text_content)
-                document_type = classify_document_type(name, text_content)
-                source_url = full_url
+                meeting_date = extract_meeting_date(text_content_clean)
 
-            cur.execute("""
-                INSERT INTO documents (
-                    source, name, url, server_relative_url,
-                    created, modified, size, text_content,
-                    indexed_at, search_vector, meeting_date,
-                    document_type, source_url
+                document_type = classify_document_type(
+                    name_clean,
+                    text_content_clean
                 )
-                VALUES (
-                    %s, %s, %s, %s,
-                    %s, %s, %s, %s,
-                    %s,
-                    to_tsvector('english', unaccent(coalesce(%s,'') || ' ' || coalesce(%s,''))),
-                    %s, %s, %s
-                )
-                ON CONFLICT (url) DO UPDATE SET
-                    source = EXCLUDED.source,
-                    name = EXCLUDED.name,
-                    server_relative_url = EXCLUDED.server_relative_url,
-                    created = EXCLUDED.created,
-                    modified = EXCLUDED.modified,
-                    size = EXCLUDED.size,
-                    text_content = EXCLUDED.text_content,
-                    indexed_at = EXCLUDED.indexed_at,
-                    search_vector = EXCLUDED.search_vector,
-                    meeting_date = EXCLUDED.meeting_date,
-                    document_type = EXCLUDED.document_type,
-                    source_url = EXCLUDED.source_url
-                RETURNING id
-            """, (
-                source_name, name, full_url, server_url,
-                created, modified, size, text_content,
-                datetime.utcnow(),
-                name, text_content,
-                meeting_date, document_type, source_url
-            ))
 
-        document_id_row = cur.fetchone()
+                source_url = full_url_clean
 
-            if not document_id_row:
-                print(f"WARNING: No document id returned for {name}", flush=True)
-                continue
-
-        document_id = document_id_row[0]
-            
-        cur.execute("""
-            DELETE FROM motions
-            WHERE document_id = %s
-        """, (document_id,))
-            
-        motions = extract_motions(text_content)
-
-        for motion in motions:
                 cur.execute("""
-                    INSERT INTO motions (
+                    INSERT INTO documents (
+                        source,
+                        name,
+                        url,
+                        server_relative_url,
+                        created,
+                        modified,
+                        size,
+                        text_content,
+                        indexed_at,
+                        search_vector,
+                        meeting_date,
+                        document_type,
+                        source_url
+                    )
+                    VALUES (
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        to_tsvector(
+                            'english',
+                            unaccent(
+                                coalesce(%s,'') || ' ' ||
+                                coalesce(%s,'')
+                            )
+                        ),
+                        %s,
+                        %s,
+                        %s
+                    )
+                    ON CONFLICT (url)
+                    DO UPDATE SET
+                        source = EXCLUDED.source,
+                        name = EXCLUDED.name,
+                        server_relative_url = EXCLUDED.server_relative_url,
+                        created = EXCLUDED.created,
+                        modified = EXCLUDED.modified,
+                        size = EXCLUDED.size,
+                        text_content = EXCLUDED.text_content,
+                        indexed_at = EXCLUDED.indexed_at,
+                        search_vector = EXCLUDED.search_vector,
+                        meeting_date = EXCLUDED.meeting_date,
+                        document_type = EXCLUDED.document_type,
+                        source_url = EXCLUDED.source_url
+                    RETURNING id
+                """, (
+                    source_clean,
+                    name_clean,
+                    full_url_clean,
+                    server_url_clean,
+                    created,
+                    modified,
+                    size,
+                    text_content_clean,
+                    datetime.utcnow(),
+                    name_clean,
+                    text_content_clean,
+                    meeting_date,
+                    document_type,
+                    source_url
+                ))
+
+                document_id_row = cur.fetchone()
+
+                if not document_id_row:
+                    print(
+                        f"WARNING: No document id returned for {name}",
+                        flush=True
+                    )
+                    continue
+
+                document_id = document_id_row[0]
+
+                cur.execute("""
+                    DELETE FROM motions
+                    WHERE document_id = %s
+                """, (document_id,))
+
+                motions = extract_motions(text_content_clean)
+
+                for motion in motions:
+
+                    cur.execute("""
+                        INSERT INTO motions (
+                            document_id,
+                            meeting_date,
+                            motion_text,
+                            vote_result,
+                            topic
+                        )
+                        VALUES (
+                            %s,
+                            %s,
+                            %s,
+                            %s,
+                            %s
+                        )
+                    """, (
                         document_id,
                         meeting_date,
-                        motion_text,
-                        vote_result,
-                        topic
-                    )
-                    VALUES (%s, %s, %s, %s, %s)
-                """, (
-                    document_id,
-                    meeting_date,
-                    motion["motion_text"],
-                    motion["vote_result"],
-                    motion["topic"]
-                ))
+                        motion["motion_text"],
+                        motion["vote_result"],
+                        motion["topic"]
+                    ))
+
     print(f"Finished {source_name}")
 
 
