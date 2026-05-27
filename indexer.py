@@ -232,7 +232,6 @@ def fetch_files(api_url):
 
     return files
 
-
 def index_source(source_name, api_url):
     print(f"Checking {source_name}...")
 
