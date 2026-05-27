@@ -313,6 +313,16 @@ def search(
         html_out += "</table>"
 
     html_out += """
+
+<div class="card" style="margin-top:25px;">
+    <h3>Definitions</h3>
+    <p><b>Total Documents:</b> Number of indexed PDFs/documents currently in TimberWatch.</p>
+    <p><b>Total Motions:</b> Motions extracted from board minutes. This depends on successful motion parsing.</p>
+    <p><b>Failed / Nay Motions:</b> Motions that appear to have failed or include negative vote language.</p>
+    <p><b>Abstentions:</b> Trustee votes detected as abstentions.</p>
+    <p><b>Rank Score:</b> PostgreSQL search relevance score. Higher means the search terms matched more strongly in the document name or text.</p>
+    <p><b>Matching Text:</b> A highlighted excerpt from the document where your search terms appear.</p>
+</div>
     </body>
     </html>
     """
