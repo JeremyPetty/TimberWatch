@@ -29,13 +29,17 @@ def search(
     source: str = "",
     document_type: str = "",
     start_date: str = "",
-    end_date: str = ""
+    end_date: str = "",
+    trustee: str = "",
+    view: str = ""
 ):
     q = q.strip()
     source = source.strip()
     document_type = document_type.strip()
     start_date = start_date.strip()
     end_date = end_date.strip()
+    trustee = trustee.strip()
+    view = view.strip()
 
     results = []
     error = ""
@@ -162,7 +166,19 @@ def search(
             mark {{ background: yellow; font-weight: bold; }}
             .small {{ font-size: 13px; color: #555; }}
             .cards {{ display:flex; gap:12px; flex-wrap:wrap; margin-bottom:20px; }}
-            .card {{ background:white; border:1px solid #ddd; border-radius:8px; padding:14px; min-width:150px; }}
+            .card {
+                background:white;
+                border:1px solid #ddd;
+                border-radius:8px;
+                padding:14px;
+                min-width:150px;
+                text-decoration:none;
+                color:black;
+}
+
+.card:hover {
+    background:#f0f6ff;
+}
             .card .num {{ font-size:24px; font-weight:bold; }}
             .filters {{ background:white; border:1px solid #ddd; border-radius:8px; padding:12px; }}
             .topic-pill {{ display:inline-block; background:#e8eef7; padding:5px 8px; border-radius:12px; margin:3px; }}
@@ -172,23 +188,65 @@ def search(
         <h1>TimberWatch</h1>
 
         <div class="cards">
-            <div class="card"><div class="num">{dashboard["documents"]}</div><div>Total Documents</div></div>
-            <div class="card"><div class="num">{dashboard["motions"]}</div><div>Total Motions</div></div>
-            <div class="card"><div class="num">{dashboard["failed_motions"]}</div><div>Failed / Nay Motions</div></div>
-            <div class="card"><div class="num">{dashboard["abstentions"]}</div><div>Abstentions</div></div>
-        </div>
+
+    <a class="card" href="/search?view=documents">
+        <div class="num">{dashboard["documents"]}</div>
+        <div>Total Documents</div>
+    </a>
+
+    <a class="card" href="/search?view=motions">
+        <div class="num">{dashboard["motions"]}</div>
+        <div>Total Motions</div>
+    </a>
+
+    <a class="card" href="/search?view=failed">
+        <div class="num">{dashboard["failed_motions"]}</div>
+        <div>Failed / Nay Motions</div>
+    </a>
+
+    <a class="card" href="/search?view=abstentions">
+        <div class="num">{dashboard["abstentions"]}</div>
+        <div>Abstentions</div>
+    </a>
+
+</div>
 
         <div class="card">
             <b>Top Motion Topics</b><br>
     """
-
+    
     if dashboard["topics"]:
         for topic, count in dashboard["topics"]:
             html_out += f"<span class='topic-pill'>{esc(topic)}: {count}</span>"
     else:
         html_out += "<span class='small'>No motion topics indexed yet.</span>"
 
-    html_out += f"""
+html_out += """
+
+</div>
+
+<br>
+
+<div class="card">
+    <b>Trustees</b><br>
+"""
+
+if dashboard["trustees"]:
+    for trustee_name, in dashboard["trustees"]:
+
+        html_out += f"""
+            <a class="topic-pill"
+               href="/search?trustee={esc(trustee_name)}">
+                {esc(trustee_name)}
+            </a>
+        """
+
+else:
+    html_out += "<span class='small'>No trustee votes indexed yet.</span>"
+
+html_out += "</div><br>"
+
+html_out += f"""
         </div>
 
         <br>
@@ -242,15 +300,7 @@ def search(
     <a href="/" style="margin-left:10px;">Clear</a>
 </form>
 
-            <input type="date" name="start_date" value="{esc(start_date)}">
 
-            <input type="date" name="end_date" value="{esc(end_date)}">
-
-            <button type="submit">Search</button>
-            <a href="/" style="margin-left:10px;">Clear</a>
-        </form>
-
-        <p><a href="/status">Status</a></p>
         <hr>
     """
 
