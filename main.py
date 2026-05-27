@@ -64,3 +64,5 @@ def search(q: str = ""):
         """
 
     return html
+    
+print("Indexing complete.", flush=True)
