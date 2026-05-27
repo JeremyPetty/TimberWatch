@@ -2,8 +2,124 @@ import os
 import requests
 import fitz
 import psycopg2
+import re
 from urllib.parse import quote
 from datetime import datetime
+
+TOPIC_KEYWORDS = {
+    "Budget / Finance": [
+        "budget", "audit", "financial", "expenditure",
+        "warrant", "fund", "fiscal"
+    ],
+
+    "Facilities": [
+        "construction", "facility", "building",
+        "campus", "bond"
+    ],
+
+    "Personnel": [
+        "employment", "appointment", "salary",
+        "resignation", "hiring"
+    ],
+
+    "Policy": [
+        "board policy", "administrative procedure",
+        "bp ", "ap "
+    ],
+
+    "Curriculum": [
+        "curriculum", "course", "program"
+    ],
+
+    "Governance": [
+        "trustee", "agenda", "election",
+        "governance", "board"
+    ],
+
+    "Closed Session": [
+        "closed session", "litigation",
+        "labor negotiations"
+    ]
+}
+
+def classify_topic(text):
+    text_lower = text.lower()
+
+    for topic, keywords in TOPIC_KEYWORDS.items():
+        for keyword in keywords:
+            if keyword in text_lower:
+                return topic
+
+    return "General"
+
+
+def extract_meeting_date(text):
+    patterns = [
+        r'([A-Z][a-z]+ \d{1,2}, \d{4})',
+        r'(\d{1,2}/\d{1,2}/\d{4})'
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, text)
+
+        if match:
+            raw_date = match.group(1)
+
+            for fmt in ("%B %d, %Y", "%m/%d/%Y"):
+                try:
+                    return datetime.strptime(raw_date, fmt).date()
+                except:
+                    pass
+
+    return None
+
+
+def classify_document_type(name, text):
+    combined = f"{name} {text}".lower()
+
+    if "minutes" in combined:
+        return "Minutes"
+
+    if "agenda" in combined:
+        return "Agenda"
+
+    if "board policy" in combined or "bp " in combined:
+        return "Board Policy"
+
+    if "administrative procedure" in combined or "ap " in combined:
+        return "Administrative Procedure"
+
+    return "Other"
+
+def extract_motions(text):
+    motions = []
+
+    motion_patterns = [
+        r'Motion.*?(approved|passed|failed)',
+        r'Moved by.*?(approved|passed|failed)',
+        r'AYES:.*?NOES:.*?',
+    ]
+
+    for pattern in motion_patterns:
+        matches = re.finditer(pattern, text, re.IGNORECASE | re.DOTALL)
+
+        for match in matches:
+            motion_text = match.group(0)
+
+            vote_result = "Passed"
+
+            if "failed" in motion_text.lower():
+                vote_result = "Failed"
+
+            topic = classify_topic(motion_text)
+
+            motions.append({
+                "motion_text": motion_text[:4000],
+                "vote_result": vote_result,
+                "topic": topic
+            })
+
+    return motions
 
 DATABASE_URL = os.environ["DATABASE_URL"]
 
@@ -55,7 +171,9 @@ def init_db():
 
             cur.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm;")
             cur.execute("CREATE EXTENSION IF NOT EXISTS unaccent;")
-
+            cur.execute("ALTER TABLE documents ADD COLUMN IF NOT EXISTS meeting_date DATE;")
+            cur.execute("ALTER TABLE documents ADD COLUMN IF NOT EXISTS document_type TEXT;")
+            cur.execute("ALTER TABLE documents ADD COLUMN IF NOT EXISTS source_url TEXT;")
             cur.execute("""
                 CREATE INDEX IF NOT EXISTS documents_search_idx
                 ON documents USING GIN(search_vector);
@@ -153,23 +271,29 @@ def index_source(source_name, api_url):
                         print(f"FAILED PDF: {name} | {full_url} | {e}", flush=True)
                         text_content = ""
 
-                        source_name = clean_text_for_postgres(source_name)
-                        name = clean_text_for_postgres(name)
-                        full_url = clean_text_for_postgres(full_url)
-                        server_url = clean_text_for_postgres(server_url)
-                        text_content = clean_text_for_postgres(text_content)
-                
+                source_name = clean_text_for_postgres(source_name)
+                name = clean_text_for_postgres(name)
+                full_url = clean_text_for_postgres(full_url)
+                server_url = clean_text_for_postgres(server_url)
+                text_content = clean_text_for_postgres(text_content)
+
+                meeting_date = extract_meeting_date(text_content)
+                document_type = classify_document_type(name, text_content)
+                source_url = full_url
+
                 cur.execute("""
                     INSERT INTO documents (
                         source, name, url, server_relative_url,
                         created, modified, size, text_content,
-                        indexed_at, search_vector
+                        indexed_at, search_vector, meeting_date,
+                        document_type, source_url
                     )
                     VALUES (
                         %s, %s, %s, %s,
                         %s, %s, %s, %s,
                         %s,
-                        to_tsvector('english', unaccent(coalesce(%s,'') || ' ' || coalesce(%s,'')))
+                        to_tsvector('english', unaccent(coalesce(%s,'') || ' ' || coalesce(%s,''))),
+                        %s, %s, %s
                     )
                     ON CONFLICT (url) DO UPDATE SET
                         source = EXCLUDED.source,
@@ -180,20 +304,46 @@ def index_source(source_name, api_url):
                         size = EXCLUDED.size,
                         text_content = EXCLUDED.text_content,
                         indexed_at = EXCLUDED.indexed_at,
-                        search_vector = EXCLUDED.search_vector
+                        search_vector = EXCLUDED.search_vector,
+                        meeting_date = EXCLUDED.meeting_date,
+                        document_type = EXCLUDED.document_type,
+                        source_url = EXCLUDED.source_url
+                    RETURNING id
                 """, (
                     source_name, name, full_url, server_url,
                     created, modified, size, text_content,
                     datetime.utcnow(),
-                    name, text_content
+                    name, text_content,
+                    meeting_date, document_type, source_url
                 ))
 
+            document_id = cur.fetchone()[0]
+                
+            motions = extract_motions(text_content)
+
+            for motion in motions:
+                cur.execute("""
+                    INSERT INTO motions (
+                        document_id,
+                        meeting_date,
+                        motion_text,
+                        vote_result,
+                        topic
+                    )
+                    VALUES (%s, %s, %s, %s, %s)
+                """, (
+                    document_id,
+                    meeting_date,
+                    motion["motion_text"],
+                    motion["vote_result"],
+                    motion["topic"]
+                ))
     print(f"Finished {source_name}")
 
 
 def main():
     init_db()
-
+    
     for source_name, api_url in SOURCES.items():
         index_source(source_name, api_url)
 
