@@ -128,10 +128,14 @@ def index_source(source_name, api_url):
                 text_content = ""
 
                 if name.lower().endswith(".pdf"):
-                    print(f"Indexing PDF: {name}")
-                    pdf_response = requests.get(full_url, headers=HEADERS, timeout=120)
-                    pdf_response.raise_for_status()
-                    text_content = extract_pdf_text(pdf_response.content)
+                    try:
+                        print(f"Indexing PDF: {name}", flush=True)
+                        pdf_response = requests.get(full_url, headers=HEADERS, timeout=120)
+                        pdf_response.raise_for_status()
+                        text_content = extract_pdf_text(pdf_response.content)
+                    except Exception as e:
+                        print(f"FAILED PDF: {name} | {full_url} | {e}", flush=True)
+                        text_content = ""
 
                 cur.execute("""
                     INSERT INTO documents (
