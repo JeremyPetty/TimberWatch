@@ -5,7 +5,7 @@ import psycopg2
 from urllib.parse import quote
 from datetime import datetime
 
-DATABASE_URL = os.environ["DATABASE_URL"]
+DATABASE_URL = os.environ["postgresql://timbertrack_db_user:ZAln5yyyUfdPxqyQ9Mj1kzJ69VtyHqom@dpg-d8bhapuk1jcs7385oe10-a/timbertrack_db"]
 
 SITE_ROOT = "https://www.cos.edu"
 
