@@ -196,8 +196,6 @@ def search(
         <form class="filters" action="/search" method="get">
             <input name="q" value="{esc(q)}" placeholder="Search documents..." style="width:360px;">
 
-            <input name="source" value="{esc(source)}" placeholder="Source">
-
             <form class="filters" action="/search" method="get">
     <input name="q" value="{esc(q)}" placeholder="Search documents..." style="width:360px;">
 
