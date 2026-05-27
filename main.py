@@ -214,15 +214,26 @@ def search(
         <div class="card">
             <b>Top Motion Topics</b><br>
     """
-    
     if dashboard["topics"]:
-        for topic, count in dashboard["topics"]:
-            html_out += f"<span class='topic-pill'>{esc(topic)}: {count}</span>"
-    else:
-        html_out += "<span class='small'>No motion topics indexed yet.</span>"
+
+    for topic, count in dashboard["topics"]:
+
+        html_out += f"""
+            <a class='topic-pill'
+               href="/search?q={esc(topic)}">
+                {esc(topic)}: {count}
+            </a>
+        """
+
+else:
+
+    html_out += """
+        <span class='small'>
+            No motion topics indexed yet.
+        </span>
+    """
 
 html_out += """
-
 </div>
 
 <br>
@@ -232,6 +243,7 @@ html_out += """
 """
 
 if dashboard["trustees"]:
+
     for trustee_name, in dashboard["trustees"]:
 
         html_out += f"""
@@ -242,67 +254,104 @@ if dashboard["trustees"]:
         """
 
 else:
-    html_out += "<span class='small'>No trustee votes indexed yet.</span>"
 
-html_out += "</div><br>"
+    html_out += """
+        <span class='small'>
+            No trustee votes indexed yet.
+        </span>
+    """
+
+html_out += """
+</div>
+
+<br>
+"""
 
 html_out += f"""
-        </div>
+<form class="filters" action="/search" method="get">
 
-        <br>
-
-        <form class="filters" action="/search" method="get">
-            <input name="q" value="{esc(q)}" placeholder="Search documents..." style="width:360px;">
-
-            <form class="filters" action="/search" method="get">
-    <input name="q" value="{esc(q)}" placeholder="Search documents..." style="width:360px;">
+    <input
+        name="q"
+        value="{esc(q)}"
+        placeholder="Search documents..."
+        style="width:360px;"
+    >
 
     <select name="source">
+
         <option value="">All Sources</option>
-        <option value="Board Documents" {"selected" if source == "Board Documents" else ""}>
+
+        <option value="Board Documents"
+            {"selected" if source == "Board Documents" else ""}>
             Board Documents
         </option>
-        <option value="BP/AP/AR" {"selected" if source == "BP/AP/AR" else ""}>
+
+        <option value="BP/AP/AR"
+            {"selected" if source == "BP/AP/AR" else ""}>
             BP/AP/AR
         </option>
+
     </select>
 
     <select name="document_type">
+
         <option value="">All Document Types</option>
 
-        <option value="Minutes" {"selected" if document_type == "Minutes" else ""}>
+        <option value="Minutes"
+            {"selected" if document_type == "Minutes" else ""}>
             Minutes
         </option>
 
-        <option value="Agenda" {"selected" if document_type == "Agenda" else ""}>
+        <option value="Agenda"
+            {"selected" if document_type == "Agenda" else ""}>
             Agenda
         </option>
 
-        <option value="Board Policy" {"selected" if document_type == "Board Policy" else ""}>
+        <option value="Board Policy"
+            {"selected" if document_type == "Board Policy" else ""}>
             Board Policy
         </option>
 
-        <option value="Administrative Procedure" {"selected" if document_type == "Administrative Procedure" else ""}>
+        <option value="Administrative Procedure"
+            {"selected" if document_type == "Administrative Procedure" else ""}>
             Administrative Procedure
         </option>
 
-        <option value="Other" {"selected" if document_type == "Other" else ""}>
+        <option value="Other"
+            {"selected" if document_type == "Other" else ""}>
             Other
         </option>
+
     </select>
 
-    <input type="date" name="start_date" value="{esc(start_date)}">
+    <input
+        type="date"
+        name="start_date"
+        value="{esc(start_date)}"
+    >
 
-    <input type="date" name="end_date" value="{esc(end_date)}">
+    <input
+        type="date"
+        name="end_date"
+        value="{esc(end_date)}"
+    >
 
-    <button type="submit">Search</button>
+    <button type="submit">
+        Search
+    </button>
 
-    <a href="/" style="margin-left:10px;">Clear</a>
+    <a href="/" style="margin-left:10px;">
+        Clear
+    </a>
+
 </form>
 
+<p>
+    <a href="/status">Status</a>
+</p>
 
-        <hr>
-    """
+<hr>
+"""
 
     if error:
         html_out += f"<p style='color:red;'><b>Error:</b> {esc(error)}</p>"
