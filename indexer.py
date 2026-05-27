@@ -66,7 +66,16 @@ def init_db():
                 ON documents USING GIN(name gin_trgm_ops);
             """)
 
+def clean_text_for_postgres(text):
+    if not text:
+        return ""
 
+    return (
+        text
+        .replace("\x00", "")
+        .replace("\u0000", "")
+    )
+    
 def clean_date(value):
     if not value:
         return None
@@ -132,11 +141,16 @@ def index_source(source_name, api_url):
                         print(f"Indexing PDF: {name}", flush=True)
                         pdf_response = requests.get(full_url, headers=HEADERS, timeout=120)
                         pdf_response.raise_for_status()
-                        text_content = extract_pdf_text(pdf_response.content)
+                        text_content = clean_text_for_postgres(extract_pdf_text(pdf_response.content))
                     except Exception as e:
                         print(f"FAILED PDF: {name} | {full_url} | {e}", flush=True)
                         text_content = ""
 
+                        source_name = clean_text_for_postgres(source_name)
+                        name = clean_text_for_postgres(name)
+                        server_url = clean_text_for_postgres(server_url)
+                        text_content = clean_text_for_postgres(text_content)
+                
                 cur.execute("""
                     INSERT INTO documents (
                         source, name, url, server_relative_url,
