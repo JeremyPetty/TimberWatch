@@ -83,7 +83,7 @@ def search(
                 """)
                 dashboard["topics"] = cur.fetchall()
 
-                if q:
+                if q or source or document_type or start_date or end_date or trustee:
                     where_parts = [
                         """
                         (
@@ -198,7 +198,51 @@ def search(
 
             <input name="source" value="{esc(source)}" placeholder="Source">
 
-            <input name="document_type" value="{esc(document_type)}" placeholder="Document Type">
+            <form class="filters" action="/search" method="get">
+    <input name="q" value="{esc(q)}" placeholder="Search documents..." style="width:360px;">
+
+    <select name="source">
+        <option value="">All Sources</option>
+        <option value="Board Documents" {"selected" if source == "Board Documents" else ""}>
+            Board Documents
+        </option>
+        <option value="BP/AP/AR" {"selected" if source == "BP/AP/AR" else ""}>
+            BP/AP/AR
+        </option>
+    </select>
+
+    <select name="document_type">
+        <option value="">All Document Types</option>
+
+        <option value="Minutes" {"selected" if document_type == "Minutes" else ""}>
+            Minutes
+        </option>
+
+        <option value="Agenda" {"selected" if document_type == "Agenda" else ""}>
+            Agenda
+        </option>
+
+        <option value="Board Policy" {"selected" if document_type == "Board Policy" else ""}>
+            Board Policy
+        </option>
+
+        <option value="Administrative Procedure" {"selected" if document_type == "Administrative Procedure" else ""}>
+            Administrative Procedure
+        </option>
+
+        <option value="Other" {"selected" if document_type == "Other" else ""}>
+            Other
+        </option>
+    </select>
+
+    <input type="date" name="start_date" value="{esc(start_date)}">
+
+    <input type="date" name="end_date" value="{esc(end_date)}">
+
+    <button type="submit">Search</button>
+
+    <a href="/" style="margin-left:10px;">Clear</a>
+</form>
 
             <input type="date" name="start_date" value="{esc(start_date)}">
 
