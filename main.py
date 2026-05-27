@@ -151,43 +151,113 @@ def search(
 
     except Exception as e:
         error = str(e)
+-----Edit
+html_out = f"""
+<html>
+<head>
+    <title>TimberWatch</title>
 
-    html_out = f"""
-    <html>
-    <head>
-        <title>TimberWatch</title>
-        <style>
-            body {{ font-family: Arial, sans-serif; margin: 30px; background:#fafafa; }}
-            input, select {{ padding: 8px; font-size: 14px; margin: 4px; }}
-            button {{ padding: 8px 12px; }}
-            table {{ border-collapse: collapse; width: 100%; margin-top: 20px; background:white; }}
-            th, td {{ border: 1px solid #ddd; padding: 8px; vertical-align: top; }}
-            th {{ background: #f2f2f2; }}
-            mark {{ background: yellow; font-weight: bold; }}
-            .small {{ font-size: 13px; color: #555; }}
-            .cards {{ display:flex; gap:12px; flex-wrap:wrap; margin-bottom:20px; }}
-            .card {
-                background:white;
-                border:1px solid #ddd;
-                border-radius:8px;
-                padding:14px;
-                min-width:150px;
-                text-decoration:none;
-                color:black;
-}
+    <style>
 
-.card:hover {
-    background:#f0f6ff;
-}
-            .card .num {{ font-size:24px; font-weight:bold; }}
-            .filters {{ background:white; border:1px solid #ddd; border-radius:8px; padding:12px; }}
-            .topic-pill {{ display:inline-block; background:#e8eef7; padding:5px 8px; border-radius:12px; margin:3px; }}
-        </style>
-    </head>
-    <body>
-        <h1>TimberWatch</h1>
+        body {{
+            font-family: Arial, sans-serif;
+            margin: 30px;
+            background:#fafafa;
+        }}
 
-        <div class="cards">
+        input, select {{
+            padding: 8px;
+            font-size: 14px;
+            margin: 4px;
+        }}
+
+        button {{
+            padding: 8px 12px;
+        }}
+
+        table {{
+            border-collapse: collapse;
+            width: 100%;
+            margin-top: 20px;
+            background:white;
+        }}
+
+        th, td {{
+            border: 1px solid #ddd;
+            padding: 8px;
+            vertical-align: top;
+        }}
+
+        th {{
+            background: #f2f2f2;
+        }}
+
+        mark {{
+            background: yellow;
+            font-weight: bold;
+        }}
+
+        .small {{
+            font-size: 13px;
+            color: #555;
+        }}
+
+        .cards {{
+            display:flex;
+            gap:12px;
+            flex-wrap:wrap;
+            margin-bottom:20px;
+        }}
+
+        .card {{
+            background:white;
+            border:1px solid #ddd;
+            border-radius:8px;
+            padding:14px;
+            min-width:150px;
+            text-decoration:none;
+            color:black;
+        }}
+
+        .card:hover {{
+            background:#f0f6ff;
+        }}
+
+        .card .num {{
+            font-size:24px;
+            font-weight:bold;
+        }}
+
+        .filters {{
+            background:white;
+            border:1px solid #ddd;
+            border-radius:8px;
+            padding:12px;
+        }}
+
+        .topic-pill {{
+            display:inline-block;
+            background:#e8eef7;
+            padding:5px 8px;
+            border-radius:12px;
+            margin:3px;
+            text-decoration:none;
+            color:black;
+        }}
+
+        .topic-pill:hover {{
+            background:#d5e6ff;
+        }}
+
+    </style>
+
+</head>
+
+<body>
+
+<h1>TimberWatch</h1>
+
+<div class="cards">
 
     <a class="card" href="/search?view=documents">
         <div class="num">{dashboard["documents"]}</div>
@@ -211,10 +281,12 @@ def search(
 
 </div>
 
-        <div class="card">
-            <b>Top Motion Topics</b><br>
-    """
-    if dashboard["topics"]:
+<div class="card">
+
+    <b>Top Motion Topics</b><br>
+"""
+
+if dashboard["topics"]:
 
     for topic, count in dashboard["topics"]:
 
@@ -239,10 +311,11 @@ html_out += """
 <br>
 
 <div class="card">
+
     <b>Trustees</b><br>
 """
 
-if dashboard["trustees"]:
+if dashboard.get("trustees"):
 
     for trustee_name, in dashboard["trustees"]:
 
@@ -261,13 +334,11 @@ else:
         </span>
     """
 
-html_out += """
+html_out += f"""
 </div>
 
 <br>
-"""
 
-html_out += f"""
 <form class="filters" action="/search" method="get">
 
     <input
@@ -353,77 +424,136 @@ html_out += f"""
 <hr>
 """
 
-    if error:
-        html_out += f"<p style='color:red;'><b>Error:</b> {esc(error)}</p>"
+if error:
 
-    if q and not results and not error:
-        html_out += "<p>No results found.</p>"
-
-    if results:
-        html_out += f"<p><b>{len(results)}</b> results found.</p>"
-        html_out += """
-        <table>
-            <tr>
-                <th>Document</th>
-                <th>Source</th>
-                <th>Type</th>
-                <th>Meeting Date</th>
-                <th>Created</th>
-                <th>Modified</th>
-                <th>Rank</th>
-                <th>Matching Text</th>
-                <th>Actions</th>
-            </tr>
-        """
-
-        for row in results:
-            (
-                row_source,
-                name,
-                url,
-                created,
-                modified,
-                meeting_date,
-                row_document_type,
-                source_url,
-                rank,
-                match_context
-            ) = row
-
-            open_url = source_url or url or ""
-
-            html_out += f"""
-            <tr>
-                <td><b>{esc(name)}</b></td>
-                <td>{esc(row_source)}</td>
-                <td>{esc(row_document_type)}</td>
-                <td>{esc(meeting_date)}</td>
-                <td>{esc(created)}</td>
-                <td>{esc(modified)}</td>
-                <td>{round(rank or 0, 4)}</td>
-                <td>{match_context or ""}</td>
-                <td>
-                    <a href="{esc(open_url)}" target="_blank">Open Original PDF</a><br>
-                    <a href="{esc(open_url)}" download>Download</a>
-                </td>
-            </tr>
-            """
-
-        html_out += "</table>"
-
-    html_out += """
-
-<div class="card" style="margin-top:25px;">
-    <h3>Definitions</h3>
-    <p><b>Total Documents:</b> Number of indexed PDFs/documents currently in TimberWatch.</p>
-    <p><b>Total Motions:</b> Motions extracted from board minutes. This depends on successful motion parsing.</p>
-    <p><b>Failed / Nay Motions:</b> Motions that appear to have failed or include negative vote language.</p>
-    <p><b>Abstentions:</b> Trustee votes detected as abstentions.</p>
-    <p><b>Rank Score:</b> PostgreSQL search relevance score. Higher means the search terms matched more strongly in the document name or text.</p>
-    <p><b>Matching Text:</b> A highlighted excerpt from the document where your search terms appear.</p>
-</div>
-    </body>
-    </html>
+    html_out += f"""
+        <p style='color:red;'>
+            <b>Error:</b> {esc(error)}
+        </p>
     """
 
-    return html_out
+if (q or source or document_type or start_date or end_date) and not results and not error:
+
+    html_out += "<p>No results found.</p>"
+
+if results:
+
+    html_out += f"""
+        <p>
+            <b>{len(results)}</b> results found.
+        </p>
+    """
+
+    html_out += """
+    <table>
+
+        <tr>
+            <th>Document</th>
+            <th>Source</th>
+            <th>Type</th>
+            <th>Meeting Date</th>
+            <th>Created</th>
+            <th>Modified</th>
+            <th>Rank</th>
+            <th>Matching Text</th>
+            <th>Actions</th>
+        </tr>
+    """
+
+    for row in results:
+
+        (
+            row_source,
+            name,
+            url,
+            created,
+            modified,
+            meeting_date,
+            row_document_type,
+            source_url,
+            rank,
+            match_context
+        ) = row
+
+        open_url = source_url or url or ""
+
+        html_out += f"""
+        <tr>
+
+            <td><b>{esc(name)}</b></td>
+
+            <td>{esc(row_source)}</td>
+
+            <td>{esc(row_document_type)}</td>
+
+            <td>{esc(meeting_date)}</td>
+
+            <td>{esc(created)}</td>
+
+            <td>{esc(modified)}</td>
+
+            <td>{round(rank or 0, 4)}</td>
+
+            <td>{match_context or ""}</td>
+
+            <td>
+                <a href="{esc(open_url)}" target="_blank">
+                    Open Original PDF
+                </a>
+
+                <br>
+
+                <a href="{esc(open_url)}" download>
+                    Download
+                </a>
+            </td>
+
+        </tr>
+        """
+
+    html_out += "</table>"
+
+html_out += """
+<br>
+
+<div class="card">
+
+    <h3>Definitions</h3>
+
+    <p>
+        <b>Total Documents:</b>
+        Number of indexed PDFs/documents currently in TimberWatch.
+    </p>
+
+    <p>
+        <b>Total Motions:</b>
+        Motions extracted from board minutes.
+    </p>
+
+    <p>
+        <b>Failed / Nay Motions:</b>
+        Motions containing failed or negative vote language.
+    </p>
+
+    <p>
+        <b>Abstentions:</b>
+        Trustee votes detected as abstentions.
+    </p>
+
+    <p>
+        <b>Rank Score:</b>
+        PostgreSQL relevance score.
+    </p>
+
+    <p>
+        <b>Matching Text:</b>
+        Highlighted text from the source document.
+    </p>
+
+</div>
+
+</body>
+</html>
+"""
+
+return html_out
