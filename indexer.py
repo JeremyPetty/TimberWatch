@@ -66,15 +66,22 @@ def init_db():
                 ON documents USING GIN(name gin_trgm_ops);
             """)
 
-def clean_text_for_postgres(text):
-    if not text:
+def clean_text_for_postgres(value):
+    if value is None:
         return ""
 
-    return (
-        text
-        .replace("\x00", "")
-        .replace("\u0000", "")
+    value = str(value)
+
+    # PostgreSQL cannot store NUL bytes in text fields
+    value = value.replace("\x00", "").replace("\u0000", "")
+
+    # Remove other low-level control characters except normal whitespace
+    value = "".join(
+        ch for ch in value
+        if ch == "\n" or ch == "\r" or ch == "\t" or ord(ch) >= 32
     )
+
+    return value
     
 def clean_date(value):
     if not value:
@@ -148,6 +155,7 @@ def index_source(source_name, api_url):
 
                         source_name = clean_text_for_postgres(source_name)
                         name = clean_text_for_postgres(name)
+                        full_url = clean_text_for_postgres(full_url)
                         server_url = clean_text_for_postgres(server_url)
                         text_content = clean_text_for_postgres(text_content)
                 
