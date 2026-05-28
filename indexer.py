@@ -42,6 +42,37 @@ TOPIC_KEYWORDS = {
     ]
 }
 
+def extract_trustee_votes(motion_text):
+    votes = []
+
+    vote_sections = {
+        "Yes": ["AYES", "AYE", "YES"],
+        "No": ["NOES", "NO", "NAY", "NAYS"],
+        "Abstain": ["ABSTAIN", "ABSTENTIONS"],
+        "Absent": ["ABSENT"]
+    }
+
+    for vote_type, labels in vote_sections.items():
+        for label in labels:
+            pattern = rf"{label}\s*:\s*(.*?)(?=AYES|AYE|YES|NOES|NO|NAY|NAYS|ABSTAIN|ABSTENTIONS|ABSENT|$)"
+            match = re.search(pattern, motion_text, re.IGNORECASE | re.DOTALL)
+
+            if match:
+                names_text = match.group(1)
+                names_text = names_text.replace("\n", " ")
+                names = re.split(r",|;| and ", names_text)
+
+                for name in names:
+                    cleaned = name.strip(" .:-")
+
+                    if len(cleaned) >= 3:
+                        votes.append({
+                            "trustee_name": cleaned[:200],
+                            "vote": vote_type
+                        })
+
+    return votes
+
 def classify_topic(text):
     text_lower = text.lower()
 
@@ -405,8 +436,8 @@ def index_source(source_name, api_url):
                             %s,
                             %s,
                             %s,
-                            %s
-                        )
+                            %s)
+                            RETURNING id
                     """, (
                         document_id,
                         meeting_date,
@@ -414,7 +445,24 @@ def index_source(source_name, api_url):
                         motion["vote_result"],
                         motion["topic"]
                     ))
+                    motion_id = cur.fetchone()[0]
 
+    trustee_votes = extract_trustee_votes(motion["motion_text"])
+
+    for vote in trustee_votes:
+         cur.execute("""
+            INSERT INTO trustee_votes (
+                motion_id,
+                trustee_name,
+                vote
+            )
+            VALUES (%s, %s, %s)
+        """, (
+            motion_id,
+            vote["trustee_name"],
+            vote["vote"]
+    ))
+                    
     print(f"Finished {source_name}")
 
 
