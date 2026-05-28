@@ -11,28 +11,6 @@ DATABASE_URL = os.environ["DATABASE_URL"]
 
 app = FastAPI()
 
-@app.get("/run-ai")
-def run_ai(key: str):
-
-    admin_key = os.environ.get("ADMIN_KEY")
-
-    if key != admin_key:
-        raise HTTPException(
-            status_code=403,
-            detail="Unauthorized"
-        )
-
-    result = subprocess.run(
-        ["python", "ai_classifier.py", "--limit", "5"],
-        capture_output=True,
-        text=True
-    )
-
-    return {
-        "stdout": result.stdout,
-        "stderr": result.stderr,
-        "returncode": result.returncode
-    }
     
 def get_conn():
     return psycopg2.connect(DATABASE_URL)
@@ -638,3 +616,26 @@ def search(
     """
 
     return html_out
+
+@app.get("/run-ai")
+def run_ai(key: str):
+
+    admin_key = os.environ.get("ADMIN_KEY")
+
+    if key != admin_key:
+        raise HTTPException(
+            status_code=403,
+            detail="Unauthorized"
+        )
+
+    result = subprocess.run(
+        ["python", "ai_classifier.py", "--limit", "5"],
+        capture_output=True,
+        text=True
+    )
+
+    return {
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+        "returncode": result.returncode
+    }
