@@ -518,7 +518,7 @@ html_out += f"""
                 value="{esc(q)}"
                 placeholder="Search documents..."
                 style="width:360px;"
-            >
+            
 
             <select name="source">
                 <option value="">All Sources</option>
