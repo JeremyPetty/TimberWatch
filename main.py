@@ -102,6 +102,11 @@ def search(
         "topics": [],
         "trustees": [],
         "trustee_scorecard": [],
+        "ai_classified": 0,
+        "ai_contains_votes": 0,
+        "ai_failed_unclear": 0,
+        "ai_needs_review": 0,
+        "ai_topics": [],
     }
 
     try:
@@ -165,6 +170,44 @@ def search(
                 """)
                 dashboard["trustee_scorecard"] = cur.fetchall()
 
+                cur.execute("""
+                    SELECT COUNT(*)
+                    FROM ai_document_classifications
+                    """)
+                    dashboard["ai_classified"] = cur.fetchone()[0]
+
+                cur.execute("""
+                    SELECT COUNT(*)
+                    FROM ai_document_classifications
+                    WHERE contains_vote = TRUE
+                """)
+                dashboard["ai_contains_votes"] = cur.fetchone()[0]
+
+                cur.execute("""
+                    SELECT COUNT(*)
+                    FROM ai_document_classifications
+                    WHERE vote_result IN ('Failed', 'Unclear')
+                """)
+                dashboard["ai_failed_unclear"] = cur.fetchone()[0]
+
+                cur.execute("""
+                    SELECT COUNT(*)
+                    FROM ai_document_classifications
+                    WHERE needs_human_review = TRUE
+                """)
+                dashboard["ai_needs_review"] = cur.fetchone()[0]
+
+                cur.execute("""
+                    SELECT primary_topic, COUNT(*)
+                    FROM ai_document_classifications
+                    WHERE primary_topic IS NOT NULL
+                      AND primary_topic <> ''
+                    GROUP BY primary_topic
+                    ORDER BY COUNT(*) DESC
+                    LIMIT 5
+                """)
+                dashboard["ai_topics"] = cur.fetchall()
+                
                 if q or source or document_type or start_date or end_date or view or trustee or vote:
                     where_parts = []
                     params = []
@@ -228,6 +271,41 @@ def search(
 
                     elif view == "documents":
                         where_parts.append("TRUE")
+
+                    elif view == "ai_classified":
+                        where_parts.append("""
+                            id IN (
+                                SELECT document_id
+                                FROM ai_document_classifications
+                        )
+                    """)
+
+                    elif view == "ai_votes":
+                        where_parts.append("""
+                            id IN (
+                                SELECT document_id
+                                FROM ai_document_classifications
+                                WHERE contains_vote = TRUE
+                        )
+                    """)
+
+                    elif view == "ai_failed_unclear":
+                        where_parts.append("""
+                            id IN (
+                                SELECT document_id
+                                FROM ai_document_classifications
+                                WHERE vote_result IN ('Failed', 'Unclear')
+                        )
+                    """)
+
+                    elif view == "ai_review":
+                        where_parts.append("""
+                        id IN (
+                            SELECT document_id
+                            FROM ai_document_classifications
+                            WHERE needs_human_review = TRUE
+                        )
+                    """)
 
                     if trustee and vote:
                         where_parts.append("""
@@ -496,8 +574,50 @@ def search(
         """
 
     html_out += f"""
-            </table>
-        </div>
+        </table>
+    </div>
+
+    <div class="cards">
+        <a class="card" href="{search_url(view='ai_classified')}">
+            <div class="num">{dashboard["ai_classified"]}</div>
+            <div>AI Classified Docs</div>
+        </a>
+
+        <a class="card" href="{search_url(view='ai_votes')}">
+            <div class="num">{dashboard["ai_contains_votes"]}</div>
+            <div>AI Detected Votes</div>
+        </a>
+
+        <a class="card" href="{search_url(view='ai_failed_unclear')}">
+            <div class="num">{dashboard["ai_failed_unclear"]}</div>
+            <div>AI Failed / Unclear</div>
+        </a>
+
+        <a class="card" href="{search_url(view='ai_review')}">
+            <div class="num">{dashboard["ai_needs_review"]}</div>
+            <div>Needs Human Review</div>
+        </a>
+    </div>
+
+    <div class="card">
+        <b>Top AI Topics</b><br>
+"""
+
+if dashboard["ai_topics"]:
+    for topic, count in dashboard["ai_topics"]:
+        html_out += f"""
+            <a class="topic-pill" href="{search_url(q=topic)}">
+                {esc(topic)}: {count}
+            </a>
+        """
+else:
+    html_out += "<span class='small'>No AI topics classified yet.</span>"
+
+html_out += """
+    </div>
+
+    <form class="filters" action="/search" method="get">
+"""
 
         <form class="filters" action="/search" method="get">
             <input
