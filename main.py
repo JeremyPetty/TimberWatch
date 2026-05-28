@@ -23,6 +23,33 @@ def home():
     return search()
 
 
+@app.get("/status", response_class=HTMLResponse)
+def status():
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM documents")
+                doc_count = cur.fetchone()[0]
+
+                cur.execute("SELECT COUNT(*) FROM motions")
+                motion_count = cur.fetchone()[0]
+
+        return f"""
+        <h1>TimberWatch Status</h1>
+        <p><b>Database:</b> Connected</p>
+        <p><b>Documents:</b> {doc_count}</p>
+        <p><b>Motions:</b> {motion_count}</p>
+        <p><a href="/">Back to Search</a></p>
+        """
+
+    except Exception as e:
+        return f"""
+        <h1>TimberWatch Status</h1>
+        <p style="color:red;"><b>Error:</b> {esc(e)}</p>
+        <p><a href="/">Back to Search</a></p>
+        """
+
+
 @app.get("/search", response_class=HTMLResponse)
 def search(
     q: str = "",
@@ -56,8 +83,6 @@ def search(
     try:
         with get_conn() as conn:
             with conn.cursor() as cur:
-
-                # Dashboard Counts
                 cur.execute("SELECT COUNT(*) FROM documents")
                 dashboard["documents"] = cur.fetchone()[0]
 
@@ -101,17 +126,7 @@ def search(
                 """)
                 dashboard["trustees"] = cur.fetchall()
 
-                # Run Search
-                if (
-                    q
-                    or source
-                    or document_type
-                    or start_date
-                    or end_date
-                    or view
-                    or trustee
-                ):
-
+                if q or source or document_type or start_date or end_date or view or trustee:
                     where_parts = []
                     params = []
 
@@ -123,11 +138,7 @@ def search(
                                 OR text_content ILIKE %s
                             )
                         """)
-                        params.extend([
-                            q,
-                            f"%{q}%",
-                            f"%{q}%"
-                        ])
+                        params.extend([q, f"%{q}%", f"%{q}%"])
 
                     if source:
                         where_parts.append("source = %s")
@@ -153,7 +164,7 @@ def search(
                             )
                         """)
 
-                    elif view == "failed":
+                    if view == "failed":
                         where_parts.append("""
                             id IN (
                                 SELECT document_id
@@ -164,13 +175,13 @@ def search(
                             )
                         """)
 
-                    elif view == "abstentions":
+                    if view == "abstentions":
                         where_parts.append("""
                             id IN (
                                 SELECT m.document_id
                                 FROM motions m
                                 JOIN trustee_votes tv
-                                    ON tv.motion_id = m.id
+                                  ON tv.motion_id = m.id
                                 WHERE tv.vote ILIKE '%abstain%'
                                    OR tv.vote ILIKE '%abstention%'
                             )
@@ -184,7 +195,7 @@ def search(
                                     SELECT m.document_id
                                     FROM motions m
                                     JOIN trustee_votes tv
-                                        ON tv.motion_id = m.id
+                                      ON tv.motion_id = m.id
                                     WHERE tv.trustee_name ILIKE %s
                                 )
                             )
@@ -192,12 +203,7 @@ def search(
                         params.append(f"%{trustee}%")
                         params.append(f"%{trustee}%")
 
-                    where_sql = (
-                        " AND ".join(where_parts)
-                        if where_parts
-                        else "TRUE"
-                    )
-
+                    where_sql = " AND ".join(where_parts) if where_parts else "TRUE"
                     search_query_for_rank = q if q else ""
 
                     sql = f"""
@@ -210,7 +216,6 @@ def search(
                             meeting_date,
                             document_type,
                             source_url,
-
                             CASE
                                 WHEN %s = '' THEN 0
                                 ELSE ts_rank(
@@ -218,28 +223,21 @@ def search(
                                     plainto_tsquery('english', %s)
                                 )
                             END AS rank,
-
                             CASE
-                                WHEN %s = '' THEN
-                                    coalesce(left(text_content, 350), '')
-                                ELSE
-                                    ts_headline(
-                                        'english',
-                                        coalesce(text_content, ''),
-                                        plainto_tsquery('english', %s),
-                                        'StartSel=<mark>, StopSel=</mark>, MaxFragments=2, MaxWords=55, MinWords=15'
-                                    )
+                                WHEN %s = '' THEN coalesce(left(text_content, 350), '')
+                                ELSE ts_headline(
+                                    'english',
+                                    coalesce(text_content, ''),
+                                    plainto_tsquery('english', %s),
+                                    'StartSel=<mark>, StopSel=</mark>, MaxFragments=2, MaxWords=55, MinWords=15'
+                                )
                             END AS match_context
-
                         FROM documents
-
                         WHERE {where_sql}
-
                         ORDER BY
                             rank DESC,
                             meeting_date DESC NULLS LAST,
                             modified DESC NULLS LAST
-
                         LIMIT 100
                     """
 
@@ -260,7 +258,6 @@ def search(
     <html>
     <head>
         <title>TimberWatch</title>
-
         <style>
             body {{
                 font-family: Arial, sans-serif;
@@ -268,8 +265,7 @@ def search(
                 background: #fafafa;
             }}
 
-            input,
-            select {{
+            input, select {{
                 padding: 8px;
                 font-size: 14px;
                 margin: 4px;
@@ -286,8 +282,7 @@ def search(
                 background: white;
             }}
 
-            th,
-            td {{
+            th, td {{
                 border: 1px solid #ddd;
                 padding: 8px;
                 vertical-align: top;
@@ -358,9 +353,189 @@ def search(
 
     <body>
         <h1>TimberWatch</h1>
+
+        <div class="cards">
+            <a class="card" href="/search?view=documents">
+                <div class="num">{dashboard["documents"]}</div>
+                <div>Total Documents</div>
+            </a>
+
+            <a class="card" href="/search?view=motions">
+                <div class="num">{dashboard["motions"]}</div>
+                <div>Total Motions</div>
+            </a>
+
+            <a class="card" href="/search?view=failed">
+                <div class="num">{dashboard["failed_motions"]}</div>
+                <div>Failed / Nay Motions</div>
+            </a>
+
+            <a class="card" href="/search?view=abstentions">
+                <div class="num">{dashboard["abstentions"]}</div>
+                <div>Abstentions</div>
+            </a>
+        </div>
+
+        <div class="card">
+            <b>Top Motion Topics</b><br>
     """
 
-    # Remaining HTML generation stays structurally the same...
-    # (No indentation problems found beyond this point)
+    if dashboard["topics"]:
+        for topic, count in dashboard["topics"]:
+            html_out += f"""
+                <a class="topic-pill" href="/search?q={esc(topic)}">
+                    {esc(topic)}: {count}
+                </a>
+            """
+    else:
+        html_out += "<span class='small'>No motion topics indexed yet.</span>"
+
+    html_out += """
+        </div>
+
+        <br>
+
+        <div class="card">
+            <b>Trustees</b><br>
+    """
+
+    if dashboard["trustees"]:
+        for trustee_name, in dashboard["trustees"]:
+            html_out += f"""
+                <a class="topic-pill" href="/search?trustee={esc(trustee_name)}">
+                    {esc(trustee_name)}
+                </a>
+            """
+    else:
+        html_out += "<span class='small'>No trustee votes indexed yet.</span>"
+
+    html_out += f"""
+        </div>
+
+        <br>
+
+        <form class="filters" action="/search" method="get">
+            <input
+                name="q"
+                value="{esc(q)}"
+                placeholder="Search documents..."
+                style="width:360px;"
+            >
+
+            <select name="source">
+                <option value="">All Sources</option>
+                <option value="Board Documents" {"selected" if source == "Board Documents" else ""}>
+                    Board Documents
+                </option>
+                <option value="BP/AP/AR" {"selected" if source == "BP/AP/AR" else ""}>
+                    BP/AP/AR
+                </option>
+            </select>
+
+            <select name="document_type">
+                <option value="">All Document Types</option>
+                <option value="Minutes" {"selected" if document_type == "Minutes" else ""}>
+                    Minutes
+                </option>
+                <option value="Agenda" {"selected" if document_type == "Agenda" else ""}>
+                    Agenda
+                </option>
+                <option value="Board Policy" {"selected" if document_type == "Board Policy" else ""}>
+                    Board Policy
+                </option>
+                <option value="Administrative Procedure" {"selected" if document_type == "Administrative Procedure" else ""}>
+                    Administrative Procedure
+                </option>
+                <option value="Other" {"selected" if document_type == "Other" else ""}>
+                    Other
+                </option>
+            </select>
+
+            <input type="date" name="start_date" value="{esc(start_date)}">
+            <input type="date" name="end_date" value="{esc(end_date)}">
+
+            <button type="submit">Search</button>
+            <a href="/" style="margin-left:10px;">Clear</a>
+        </form>
+
+        <p><a href="/status">Status</a></p>
+        <hr>
+    """
+
+    if error:
+        html_out += f"<p style='color:red;'><b>Error:</b> {esc(error)}</p>"
+
+    if (q or source or document_type or start_date or end_date or view or trustee) and not results and not error:
+        html_out += "<p>No results found.</p>"
+
+    if results:
+        html_out += f"<p><b>{len(results)}</b> results found.</p>"
+        html_out += """
+        <table>
+            <tr>
+                <th>Document</th>
+                <th>Source</th>
+                <th>Type</th>
+                <th>Meeting Date</th>
+                <th>Created</th>
+                <th>Modified</th>
+                <th>Rank</th>
+                <th>Matching Text</th>
+                <th>Actions</th>
+            </tr>
+        """
+
+        for row in results:
+            (
+                row_source,
+                name,
+                url,
+                created,
+                modified,
+                meeting_date,
+                row_document_type,
+                source_url,
+                rank,
+                match_context
+            ) = row
+
+            open_url = source_url or url or ""
+
+            html_out += f"""
+            <tr>
+                <td><b>{esc(name)}</b></td>
+                <td>{esc(row_source)}</td>
+                <td>{esc(row_document_type)}</td>
+                <td>{esc(meeting_date)}</td>
+                <td>{esc(created)}</td>
+                <td>{esc(modified)}</td>
+                <td>{round(rank or 0, 4)}</td>
+                <td>{match_context or ""}</td>
+                <td>
+                    <a href="{esc(open_url)}" target="_blank">Open Original PDF</a><br>
+                    <a href="{esc(open_url)}" download>Download</a>
+                </td>
+            </tr>
+            """
+
+        html_out += "</table>"
+
+    html_out += """
+        <br>
+
+        <div class="card">
+            <h3>Definitions</h3>
+
+            <p><b>Total Documents:</b> Number of indexed PDFs/documents currently in TimberWatch.</p>
+            <p><b>Total Motions:</b> Motions extracted from board minutes.</p>
+            <p><b>Failed / Nay Motions:</b> Motions containing failed or negative vote language.</p>
+            <p><b>Abstentions:</b> Trustee votes detected as abstentions.</p>
+            <p><b>Rank Score:</b> PostgreSQL relevance score. Higher usually means the search terms matched more strongly.</p>
+            <p><b>Matching Text:</b> Highlighted text from the source document.</p>
+        </div>
+
+    </body>
+    </html>
+    """
 
     return html_out
