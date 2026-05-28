@@ -97,7 +97,7 @@ def search(
                 """)
                 dashboard["trustees"] = cur.fetchall()
 
-                if q or source or document_type or start_date or end_date:
+                if q or source or document_type or start_date or end_date or view or trustee:
                     where_parts = []
                     params = []
 
@@ -126,6 +126,54 @@ def search(
                     if end_date:
                         where_parts.append("meeting_date <= %s")
                         params.append(end_date)
+
+                    if view == "documents":
+                        pass
+
+                    if view == "motions":
+                        where_parts.append("""
+                            id IN (
+                                SELECT document_id
+                                FROM motions
+                            )
+                        """)
+
+                    if view == "failed":
+                        where_parts.append("""
+                            id IN (
+                                SELECT document_id
+                                FROM motions
+                                WHERE vote_result ILIKE '%failed%'
+                                   OR vote_result ILIKE '%no%'
+                                   OR vote_result ILIKE '%nay%'
+                            )
+                        """)
+
+                    if view == "abstentions":
+                        where_parts.append("""
+                            id IN (
+                                SELECT m.document_id
+                                FROM motions m
+                                JOIN trustee_votes tv ON tv.motion_id = m.id
+                                WHERE tv.vote ILIKE '%abstain%'
+                                   OR tv.vote ILIKE '%abstention%'
+                            )
+                        """)
+
+                    if trustee:
+                        where_parts.append("""
+                            (
+                        text_content ILIKE %s
+                        OR id IN (
+                        SELECT m.document_id
+                        FROM motions m
+                        JOIN trustee_votes tv ON tv.motion_id = m.id
+                        WHERE tv.trustee_name ILIKE %s
+                    )
+                )
+            """)
+            params.append(f"%{trustee}%")
+            params.append(f"%{trustee}%")
 
                     where_sql = " AND ".join(where_parts) if where_parts else "TRUE"
 
