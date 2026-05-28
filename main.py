@@ -745,6 +745,7 @@ def search(
 
 @app.get("/run-ai")
 def run_ai(key: str):
+
     admin_key = os.environ.get("ADMIN_KEY")
 
     if key != admin_key:
@@ -753,14 +754,11 @@ def run_ai(key: str):
             detail="Unauthorized"
         )
 
-    result = subprocess.run(
-        ["python", "ai_classifier.py", "--limit", "50"],
-        capture_output=True,
-        text=True
+    subprocess.Popen(
+        ["python", "ai_classifier.py", "--limit", "50"]
     )
 
     return {
-        "stdout": result.stdout,
-        "stderr": result.stderr,
-        "returncode": result.returncode
+        "status": "AI classifier started",
+        "limit": 50
     }
