@@ -58,6 +58,7 @@ def search(
     start_date: str = "",
     end_date: str = "",
     trustee: str = "",
+    vote: str = "",
     view: str = ""
 ):
     q = q.strip()
@@ -67,6 +68,7 @@ def search(
     end_date = end_date.strip()
     trustee = trustee.strip()
     view = view.strip()
+    vote = vote.strip()
 
     results = []
     error = ""
@@ -140,7 +142,7 @@ def search(
             """)
             dashboard["trustee_scorecard"] = cur.fetchall()
                 
-                if q or source or document_type or start_date or end_date or view or trustee:
+                if q or source or document_type or start_date or end_date or view or trustee or vote:
                     where_parts = []
                     params = []
 
@@ -214,8 +216,34 @@ def search(
                                 )
                             )
                         """)
+
+                    if trustee and vote:
+                        where_parts.append("""
+                            id IN (
+                                SELECT m.document_id
+                                FROM motions m
+                                JOIN trustee_votes tv ON tv.motion_id = m.id
+                                WHERE tv.trustee_name ILIKE %s
+                                  AND tv.vote = %s
+                            )
+                        """)
+                        params.append(f"%{trustee}%")
+                        params.append(vote)
+                    elif trustee:
+                        where_parts.append("""
+                            (
+                                text_content ILIKE %s
+                                OR id IN (
+                                    SELECT m.document_id
+                                    FROM motions m
+                                    JOIN trustee_votes tv ON tv.motion_id = m.id
+                                    WHERE tv.trustee_name ILIKE %s
+                                )
+                            )
+                        """)
                         params.append(f"%{trustee}%")
                         params.append(f"%{trustee}%")
+
 
                     where_sql = " AND ".join(where_parts) if where_parts else "TRUE"
                     search_query_for_rank = q if q else ""
@@ -428,6 +456,62 @@ def search(
 
         <br>
 
+        <div class="card">
+            <b>Trustee Vote Scorecard</b><br><br>
+
+            <table>
+                <tr>
+                    <th>Trustee</th>
+                    <th>Ayes</th>
+                    <th>Nays</th>
+                    <th>Abstains</th>
+                    <th>Absents</th>
+                </tr>
+"""
+
+for trustee_name, ayes, nays, abstains, absents in dashboard["trustee_scorecard"]:
+
+    html_out += f"""
+        <tr>
+            <td>
+                <a href="/search?trustee={esc(trustee_name)}">
+                    {esc(trustee_name)}
+                </a>
+            </td>
+
+            <td>
+                <a href="/search?trustee={esc(trustee_name)}&vote=Yes">
+                    {ayes}
+                </a>
+            </td>
+
+            <td>
+                <a href="/search?trustee={esc(trustee_name)}&vote=No">
+                    {nays}
+                </a>
+            </td>
+
+            <td>
+                <a href="/search?trustee={esc(trustee_name)}&vote=Abstain">
+                    {abstains}
+                </a>
+            </td>
+
+            <td>
+                <a href="/search?trustee={esc(trustee_name)}&vote=Absent">
+                    {absents}
+                </a>
+            </td>
+        </tr>
+    """
+
+html_out += """
+            </table>
+        </div>
+
+        <br>
+"""
+html_out += f"""
         <form class="filters" action="/search" method="get">
             <input
                 name="q"
