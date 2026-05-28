@@ -11,7 +11,7 @@ DATABASE_URL = os.environ["DATABASE_URL"]
 
 app = FastAPI()
 
-    
+
 def get_conn():
     return psycopg2.connect(DATABASE_URL)
 
@@ -22,6 +22,8 @@ def esc(value):
 
 def search_url(**kwargs):
     clean = {k: v for k, v in kwargs.items() if v not in (None, "")}
+    if not clean:
+        return "/search"
     return "/search?" + urlencode(clean)
 
 
@@ -44,6 +46,9 @@ def status():
                 cur.execute("SELECT COUNT(*) FROM trustee_votes")
                 trustee_vote_count = cur.fetchone()[0]
 
+                cur.execute("SELECT COUNT(*) FROM ai_document_classifications")
+                ai_count = cur.fetchone()[0]
+
         return f"""
         <html>
         <head><title>TimberWatch Status</title></head>
@@ -53,6 +58,7 @@ def status():
             <p><b>Documents:</b> {doc_count}</p>
             <p><b>Motions:</b> {motion_count}</p>
             <p><b>Trustee Votes:</b> {trustee_vote_count}</p>
+            <p><b>AI Classifications:</b> {ai_count}</p>
             <p><a href="/">Back to Search</a></p>
         </body>
         </html>
@@ -170,11 +176,9 @@ def search(
                 """)
                 dashboard["trustee_scorecard"] = cur.fetchall()
 
-                cur.execute("""
-                    SELECT COUNT(*)
-                    FROM ai_document_classifications
-                    """)
-                    dashboard["ai_classified"] = cur.fetchone()[0]
+                # AI-powered dashboard counts
+                cur.execute("SELECT COUNT(*) FROM ai_document_classifications")
+                dashboard["ai_classified"] = cur.fetchone()[0]
 
                 cur.execute("""
                     SELECT COUNT(*)
@@ -207,7 +211,7 @@ def search(
                     LIMIT 5
                 """)
                 dashboard["ai_topics"] = cur.fetchall()
-                
+
                 if q or source or document_type or start_date or end_date or view or trustee or vote:
                     where_parts = []
                     params = []
@@ -277,8 +281,8 @@ def search(
                             id IN (
                                 SELECT document_id
                                 FROM ai_document_classifications
-                        )
-                    """)
+                            )
+                        """)
 
                     elif view == "ai_votes":
                         where_parts.append("""
@@ -286,8 +290,8 @@ def search(
                                 SELECT document_id
                                 FROM ai_document_classifications
                                 WHERE contains_vote = TRUE
-                        )
-                    """)
+                            )
+                        """)
 
                     elif view == "ai_failed_unclear":
                         where_parts.append("""
@@ -295,17 +299,17 @@ def search(
                                 SELECT document_id
                                 FROM ai_document_classifications
                                 WHERE vote_result IN ('Failed', 'Unclear')
-                        )
-                    """)
+                            )
+                        """)
 
                     elif view == "ai_review":
                         where_parts.append("""
-                        id IN (
-                            SELECT document_id
-                            FROM ai_document_classifications
-                            WHERE needs_human_review = TRUE
-                        )
-                    """)
+                            id IN (
+                                SELECT document_id
+                                FROM ai_document_classifications
+                                WHERE needs_human_review = TRUE
+                            )
+                        """)
 
                     if trustee and vote:
                         where_parts.append("""
@@ -509,6 +513,28 @@ def search(
             </a>
         </div>
 
+        <div class="cards">
+            <a class="card" href="{search_url(view='ai_classified')}">
+                <div class="num">{dashboard['ai_classified']}</div>
+                <div>AI Classified Docs</div>
+            </a>
+
+            <a class="card" href="{search_url(view='ai_votes')}">
+                <div class="num">{dashboard['ai_contains_votes']}</div>
+                <div>AI Detected Votes</div>
+            </a>
+
+            <a class="card" href="{search_url(view='ai_failed_unclear')}">
+                <div class="num">{dashboard['ai_failed_unclear']}</div>
+                <div>AI Failed / Unclear</div>
+            </a>
+
+            <a class="card" href="{search_url(view='ai_review')}">
+                <div class="num">{dashboard['ai_needs_review']}</div>
+                <div>Needs Human Review</div>
+            </a>
+        </div>
+
         <div class="card">
             <b>Top Motion Topics</b><br>
     """
@@ -522,6 +548,23 @@ def search(
             """
     else:
         html_out += "<span class='small'>No motion topics indexed yet.</span>"
+
+    html_out += """
+        </div>
+
+        <div class="card">
+            <b>Top AI Topics</b><br>
+    """
+
+    if dashboard["ai_topics"]:
+        for topic, count in dashboard["ai_topics"]:
+            html_out += f"""
+                <a class="topic-pill" href="{search_url(q=topic)}">
+                    {esc(topic)}: {count}
+                </a>
+            """
+    else:
+        html_out += "<span class='small'>No AI topics classified yet.</span>"
 
     html_out += """
         </div>
@@ -573,49 +616,11 @@ def search(
                 </tr>
         """
 
-html_out += f"""
+    html_out += f"""
             </table>
         </div>
 
-        <div class="cards">
-            <a class="card" href="{search_url(view='ai_classified')}">
-                <div class="num">{dashboard["ai_classified"]}</div>
-                <div>AI Classified Docs</div>
-            </a>
-
-            <a class="card" href="{search_url(view='ai_votes')}">
-                <div class="num">{dashboard["ai_contains_votes"]}</div>
-                <div>AI Detected Votes</div>
-            </a>
-
-            <a class="card" href="{search_url(view='ai_failed_unclear')}">
-                <div class="num">{dashboard["ai_failed_unclear"]}</div>
-                <div>AI Failed / Unclear</div>
-            </a>
-
-            <a class="card" href="{search_url(view='ai_review')}">
-                <div class="num">{dashboard["ai_needs_review"]}</div>
-                <div>Needs Human Review</div>
-            </a>
-        </div>
-
-        <div class="card">
-            <b>Top AI Topics</b><br>
-"""
-
-if dashboard["ai_topics"]:
-    for topic, count in dashboard["ai_topics"]:
-        html_out += f"""
-            <a class="topic-pill" href="{search_url(q=topic)}">
-                {esc(topic)}: {count}
-            </a>
-        """
-else:
-    html_out += "<span class='small'>No AI topics classified yet.</span>"
-
-html_out += f"""
-        </div>
-
+        <form class="filters" action="/search" method="get">
             <input
                 name="q"
                 value="{esc(q)}"
@@ -647,7 +652,6 @@ html_out += f"""
 
         <p><a href="/status">Status</a></p>
         <hr>
-"""
     """
 
     if error:
@@ -724,6 +728,10 @@ html_out += f"""
             <p><b>Total Motions:</b> Motions extracted from board minutes.</p>
             <p><b>Failed / Nay Motions:</b> Motions containing failed or negative vote language.</p>
             <p><b>Abstentions:</b> Trustee votes detected as abstentions.</p>
+            <p><b>AI Classified Docs:</b> Documents classified by the AI indexing script.</p>
+            <p><b>AI Detected Votes:</b> Documents where the AI detected a vote or voting-related action.</p>
+            <p><b>AI Failed / Unclear:</b> AI-classified documents with failed or unclear vote results.</p>
+            <p><b>Needs Human Review:</b> AI-classified documents flagged as needing manual verification.</p>
             <p><b>Rank Score:</b> PostgreSQL relevance score. Higher usually means the search terms matched more strongly.</p>
             <p><b>Matching Text:</b> Highlighted text from the source document.</p>
         </div>
@@ -734,9 +742,9 @@ html_out += f"""
 
     return html_out
 
+
 @app.get("/run-ai")
 def run_ai(key: str):
-
     admin_key = os.environ.get("ADMIN_KEY")
 
     if key != admin_key:
