@@ -78,6 +78,7 @@ def search(
         "abstentions": 0,
         "topics": [],
         "trustees": []
+        "trustee_scorecard": []
     }
 
     try:
@@ -126,6 +127,19 @@ def search(
                 """)
                 dashboard["trustees"] = cur.fetchall()
 
+                cur.execute("""
+                    SELECT
+                    trustee_name,
+                    COUNT(*) FILTER (WHERE vote = 'Yes') AS ayes,
+                    COUNT(*) FILTER (WHERE vote = 'No') AS nays,
+                    COUNT(*) FILTER (WHERE vote = 'Abstain') AS abstains,
+                    COUNT(*) FILTER (WHERE vote = 'Absent') AS absents
+                FROM trustee_votes
+                GROUP BY trustee_name
+                ORDER BY trustee_name
+            """)
+            dashboard["trustee_scorecard"] = cur.fetchall()
+                
                 if q or source or document_type or start_date or end_date or view or trustee:
                     where_parts = []
                     params = []
@@ -167,7 +181,7 @@ def search(
                     if view == "failed":
                         where_parts.append("""
                             id IN (
-                                SELECT document_id
+                                SELECT DISTINCT document_id
                                 FROM motions
                                 WHERE vote_result ILIKE '%failed%'
                                    OR vote_result ILIKE '%no%'
