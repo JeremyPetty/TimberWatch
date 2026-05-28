@@ -573,34 +573,34 @@ def search(
                 </tr>
         """
 
-    html_out += f"""
-        </table>
-    </div>
+html_out += f"""
+            </table>
+        </div>
 
-    <div class="cards">
-        <a class="card" href="{search_url(view='ai_classified')}">
-            <div class="num">{dashboard["ai_classified"]}</div>
-            <div>AI Classified Docs</div>
-        </a>
+        <div class="cards">
+            <a class="card" href="{search_url(view='ai_classified')}">
+                <div class="num">{dashboard["ai_classified"]}</div>
+                <div>AI Classified Docs</div>
+            </a>
 
-        <a class="card" href="{search_url(view='ai_votes')}">
-            <div class="num">{dashboard["ai_contains_votes"]}</div>
-            <div>AI Detected Votes</div>
-        </a>
+            <a class="card" href="{search_url(view='ai_votes')}">
+                <div class="num">{dashboard["ai_contains_votes"]}</div>
+                <div>AI Detected Votes</div>
+            </a>
 
-        <a class="card" href="{search_url(view='ai_failed_unclear')}">
-            <div class="num">{dashboard["ai_failed_unclear"]}</div>
-            <div>AI Failed / Unclear</div>
-        </a>
+            <a class="card" href="{search_url(view='ai_failed_unclear')}">
+                <div class="num">{dashboard["ai_failed_unclear"]}</div>
+                <div>AI Failed / Unclear</div>
+            </a>
 
-        <a class="card" href="{search_url(view='ai_review')}">
-            <div class="num">{dashboard["ai_needs_review"]}</div>
-            <div>Needs Human Review</div>
-        </a>
-    </div>
+            <a class="card" href="{search_url(view='ai_review')}">
+                <div class="num">{dashboard["ai_needs_review"]}</div>
+                <div>Needs Human Review</div>
+            </a>
+        </div>
 
-    <div class="card">
-        <b>Top AI Topics</b><br>
+        <div class="card">
+            <b>Top AI Topics</b><br>
 """
 
 if dashboard["ai_topics"]:
@@ -613,11 +613,8 @@ if dashboard["ai_topics"]:
 else:
     html_out += "<span class='small'>No AI topics classified yet.</span>"
 
-html_out += """
-    </div>
-
-    <form class="filters" action="/search" method="get">
-"""
+html_out += f"""
+        </div>
 
         <form class="filters" action="/search" method="get">
             <input
@@ -651,6 +648,7 @@ html_out += """
 
         <p><a href="/status">Status</a></p>
         <hr>
+"""
     """
 
     if error:
