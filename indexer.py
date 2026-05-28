@@ -43,6 +43,17 @@ TOPIC_KEYWORDS = {
 }
 
 
+FALLBACK_TRUSTEES = [
+    {"name": "Robert Aguilar", "role": "Trustee", "ward": "Ward 1", "current": True},
+    {"name": "Ken Nunes", "role": "Clerk", "ward": "Ward 2", "current": True},
+    {"name": "Raymond Macareno", "role": "President", "ward": "Ward 3", "current": True},
+    {"name": "Connie Diaz", "role": "Trustee", "ward": "Ward 4", "current": True},
+    {"name": "John Lehn", "role": "Vice President", "ward": "Ward 5", "current": True},
+    {"name": "Elizabeth Martinez", "role": "Student Trustee", "ward": "2025-2026", "current": True},
+    {"name": "Greg Sherman", "role": "Former Trustee", "ward": None, "current": False},
+]
+
+
 def get_conn():
     return psycopg2.connect(DATABASE_URL)
 
@@ -65,6 +76,134 @@ def clean_date(value):
         return None
 
     return value.replace("T", " ").replace("Z", "")
+
+
+def normalize_name(value):
+    value = clean_text_for_postgres(value)
+    value = value.replace("\n", " ")
+    value = re.sub(r"\s+", " ", value)
+    value = value.strip(" .:-,;")
+
+    value = re.sub(
+        r"^(Trustee|Mr\.?|Mrs\.?|Ms\.?|Miss|Dr\.?)\s+",
+        "",
+        value,
+        flags=re.IGNORECASE
+    )
+
+    return value.strip(" .:-,;")
+
+
+def build_aliases(full_name):
+    full_name = normalize_name(full_name)
+    parts = full_name.split()
+
+    if not parts:
+        return []
+
+    first = parts[0]
+    last = parts[-1]
+
+    aliases = {
+        full_name,
+        last,
+        f"Trustee {last}",
+        f"Mr. {last}",
+        f"Mrs. {last}",
+        f"Ms. {last}",
+        f"Dr. {last}",
+        f"{first} {last}",
+    }
+
+    return sorted(alias for alias in aliases if alias)
+
+
+def seed_fallback_trustees(cur):
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS trustee_aliases (
+            id SERIAL PRIMARY KEY,
+            trustee_id INTEGER REFERENCES trustees(id) ON DELETE CASCADE,
+            alias TEXT UNIQUE NOT NULL
+        );
+    """)
+
+    for trustee in FALLBACK_TRUSTEES:
+        cur.execute("""
+            INSERT INTO trustees (
+                name,
+                ward,
+                is_current
+            )
+            VALUES (%s, %s, %s)
+            ON CONFLICT (name)
+            DO UPDATE SET
+                ward = EXCLUDED.ward,
+                is_current = EXCLUDED.is_current
+            RETURNING id
+        """, (
+            trustee["name"],
+            trustee["ward"],
+            trustee["current"],
+        ))
+
+        trustee_id = cur.fetchone()[0]
+
+        for alias in build_aliases(trustee["name"]):
+            cur.execute("""
+                INSERT INTO trustee_aliases (
+                    trustee_id,
+                    alias
+                )
+                VALUES (%s, %s)
+                ON CONFLICT (alias)
+                DO NOTHING
+            """, (
+                trustee_id,
+                alias,
+            ))
+
+
+def load_trustee_aliases(cur):
+    cur.execute("""
+        SELECT
+            t.name,
+            a.alias
+        FROM trustees t
+        JOIN trustee_aliases a
+          ON a.trustee_id = t.id
+    """)
+
+    alias_map = {}
+
+    for full_name, alias in cur.fetchall():
+        normalized_alias = normalize_name(alias).lower()
+
+        if normalized_alias:
+            alias_map[normalized_alias] = full_name
+
+    return alias_map
+
+
+def resolve_trustee_name(raw_name, alias_map):
+    candidate = normalize_name(raw_name)
+
+    if not candidate:
+        return None
+
+    candidate_lower = candidate.lower()
+
+    if candidate_lower in alias_map:
+        return alias_map[candidate_lower]
+
+    parts = candidate.split()
+
+    if parts:
+        last = parts[-1].lower()
+
+        if last in alias_map:
+            return alias_map[last]
+
+    return None
 
 
 def classify_topic(text):
@@ -124,9 +263,14 @@ def extract_motions(text):
         return motions
 
     motion_patterns = [
-        r"Motion.*?(approved|passed|failed|carried|defeated)",
-        r"Moved by.*?(approved|passed|failed|carried|defeated)",
-        r"AYES:.*?(NOES:.*?)(?=Motion|Moved by|AYES:|$)",
+        r"(Trustee\s+[A-Za-z]+.*?Motion carried\.)",
+        r"(Trustee\s+[A-Za-z]+.*?Motion approved\.)",
+        r"(Trustee\s+[A-Za-z]+.*?Motion passed\.)",
+        r"(Trustee\s+[A-Za-z]+.*?Motion failed\.)",
+        r"(Trustee\s+[A-Za-z]+.*?Motion defeated\.)",
+        r"(Motion.*?(approved|passed|failed|carried|defeated)\.)",
+        r"(Moved by.*?(approved|passed|failed|carried|defeated)\.)",
+        r"(AYES:.*?(NOES:.*?)(?=Motion|Moved by|Trustee|AYES:|$))",
     ]
 
     seen = set()
@@ -140,7 +284,9 @@ def extract_motions(text):
             if not motion_text:
                 continue
 
-            motion_key = motion_text[:500]
+            motion_text = re.sub(r"\s+", " ", motion_text)
+
+            motion_key = motion_text[:500].lower()
 
             if motion_key in seen:
                 continue
@@ -162,52 +308,113 @@ def extract_motions(text):
     return motions
 
 
-def extract_trustee_votes(motion_text):
+def parse_names_from_vote_section(names_text):
+    names_text = clean_text_for_postgres(names_text)
+    names_text = names_text.replace("\n", " ")
+    names_text = re.sub(r"\s+", " ", names_text)
+
+    names_text = re.sub(r"\bNone\b", "", names_text, flags=re.IGNORECASE)
+    names_text = re.sub(r"\bN/A\b", "", names_text, flags=re.IGNORECASE)
+
+    raw_names = re.split(r",|;|\band\b", names_text)
+
+    cleaned_names = []
+
+    for raw in raw_names:
+        cleaned = normalize_name(raw)
+
+        if len(cleaned) < 2:
+            continue
+
+        if len(cleaned.split()) > 6:
+            continue
+
+        cleaned_names.append(cleaned)
+
+    return cleaned_names
+
+
+def extract_trustee_votes(motion_text, alias_map):
     votes = []
 
     if not motion_text:
         return votes
 
-    vote_sections = {
-        "Yes": ["AYES", "AYE", "YES"],
-        "No": ["NOES", "NO", "NAY", "NAYS"],
-        "Abstain": ["ABSTAIN", "ABSTENTIONS", "ABSTENTIONS"],
-        "Absent": ["ABSENT"],
-    }
-
     section_labels = (
-        "AYES|AYE|YES|NOES|NO|NAY|NAYS|ABSTAIN|ABSTENTIONS|ABSENT"
+        "AYES|AYE|YES|NOES|NO|NAY|NAYS|ABSTAIN|ABSTENTIONS|ABSTENTION|ABSENT"
     )
 
-    for vote_type, labels in vote_sections.items():
+    vote_sections = [
+        ("Yes", ["AYES", "AYE", "YES"]),
+        ("No", ["NOES", "NO", "NAY", "NAYS"]),
+        ("Abstain", ["ABSTAIN", "ABSTENTION", "ABSTENTIONS"]),
+        ("Absent", ["ABSENT"]),
+    ]
+
+    seen_votes = set()
+
+    for vote_type, labels in vote_sections:
         for label in labels:
-            pattern = rf"{label}\s*:\s*(.*?)(?={section_labels}|$)"
-            match = re.search(pattern, motion_text, re.IGNORECASE | re.DOTALL)
+            pattern = rf"\b{label}\b\s*:\s*(.*?)(?=\b({section_labels})\b\s*:|$)"
+            matches = re.finditer(pattern, motion_text, re.IGNORECASE | re.DOTALL)
 
-            if not match:
-                continue
+            for match in matches:
+                names_text = match.group(1)
+                possible_names = parse_names_from_vote_section(names_text)
 
-            names_text = match.group(1)
-            names_text = names_text.replace("\n", " ")
-            names_text = re.sub(r"\s+", " ", names_text)
+                for raw_name in possible_names:
+                    resolved_name = resolve_trustee_name(raw_name, alias_map)
 
-            names = re.split(r",|;|\band\b", names_text)
+                    if not resolved_name:
+                        continue
 
-            for name in names:
-                cleaned = name.strip(" .:-")
+                    vote_key = (resolved_name, vote_type)
 
-                if len(cleaned) < 3:
-                    continue
+                    if vote_key in seen_votes:
+                        continue
 
-                if len(cleaned.split()) > 6:
-                    continue
+                    seen_votes.add(vote_key)
 
-                votes.append({
-                    "trustee_name": cleaned[:200],
-                    "vote": vote_type,
-                })
+                    votes.append({
+                        "trustee_name": resolved_name,
+                        "vote": vote_type,
+                    })
 
     return votes
+
+
+def extract_moved_seconded(motion_text, alias_map):
+    moved_by = None
+    seconded_by = None
+
+    moved_patterns = [
+        r"Trustee\s+([A-Za-z]+)\s+motioned",
+        r"Trustee\s+([A-Za-z]+)\s+moved",
+        r"Moved by\s+Trustee\s+([A-Za-z]+)",
+        r"Moved by\s+([A-Za-z]+)",
+    ]
+
+    seconded_patterns = [
+        r"Trustee\s+([A-Za-z]+)\s+seconded",
+        r"Seconded by\s+Trustee\s+([A-Za-z]+)",
+        r"Seconded by\s+([A-Za-z]+)",
+    ]
+
+    for pattern in moved_patterns:
+        match = re.search(pattern, motion_text, re.IGNORECASE)
+
+        if match:
+            moved_by = resolve_trustee_name(match.group(1), alias_map)
+            break
+
+    for pattern in seconded_patterns:
+        match = re.search(pattern, motion_text, re.IGNORECASE)
+
+        if match:
+            seconded_by = resolve_trustee_name(match.group(1), alias_map)
+            break
+
+    return moved_by, seconded_by
 
 
 def extract_pdf_text(pdf_bytes):
@@ -276,6 +483,14 @@ def init_db():
             """)
 
             cur.execute("""
+                CREATE TABLE IF NOT EXISTS trustee_aliases (
+                    id SERIAL PRIMARY KEY,
+                    trustee_id INTEGER REFERENCES trustees(id) ON DELETE CASCADE,
+                    alias TEXT UNIQUE NOT NULL
+                );
+            """)
+
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS agenda_items (
                     id SERIAL PRIMARY KEY,
                     document_id INTEGER REFERENCES documents(id) ON DELETE CASCADE,
@@ -298,6 +513,9 @@ def init_db():
                     topic TEXT
                 );
             """)
+
+            cur.execute("ALTER TABLE motions ADD COLUMN IF NOT EXISTS moved_by TEXT;")
+            cur.execute("ALTER TABLE motions ADD COLUMN IF NOT EXISTS seconded_by TEXT;")
 
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS trustee_votes (
@@ -343,6 +561,8 @@ def init_db():
                 ON trustee_votes(trustee_name);
             """)
 
+            seed_fallback_trustees(cur)
+
 
 def index_source(source_name, api_url):
     print(f"Checking {source_name}...", flush=True)
@@ -351,6 +571,8 @@ def index_source(source_name, api_url):
 
     with get_conn() as conn:
         with conn.cursor() as cur:
+            alias_map = load_trustee_aliases(cur)
+
             for item in files:
                 name = item.get("Name", "")
                 server_url = item.get("ServerRelativeUrl", "")
@@ -491,48 +713,43 @@ def index_source(source_name, api_url):
                 motions = extract_motions(text_content_clean)
 
                 for motion in motions:
+                    moved_by, seconded_by = extract_moved_seconded(
+                        motion["motion_text"],
+                        alias_map
+                    )
+
                     cur.execute("""
                         INSERT INTO motions (
                             document_id,
                             meeting_date,
                             motion_text,
+                            moved_by,
+                            seconded_by,
                             vote_result,
                             topic
                         )
-                        VALUES (%s, %s, %s, %s, %s)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
                         RETURNING id
                     """, (
                         document_id,
                         meeting_date,
                         motion["motion_text"],
+                        moved_by,
+                        seconded_by,
                         motion["vote_result"],
                         motion["topic"],
                     ))
 
                     motion_id = cur.fetchone()[0]
 
-                    trustee_votes = extract_trustee_votes(motion["motion_text"])
+                    trustee_votes = extract_trustee_votes(
+                        motion["motion_text"],
+                        alias_map
+                    )
 
                     for vote in trustee_votes:
                         trustee_name = clean_text_for_postgres(vote["trustee_name"])
                         vote_value = clean_text_for_postgres(vote["vote"])
-
-                        cur.execute("""
-                            INSERT INTO trustees (
-                                name,
-                                first_seen,
-                                last_seen
-                            )
-                            VALUES (%s, %s, %s)
-                            ON CONFLICT (name)
-                            DO UPDATE SET
-                                last_seen = EXCLUDED.last_seen,
-                                is_current = TRUE
-                        """, (
-                            trustee_name,
-                            meeting_date,
-                            meeting_date,
-                        ))
 
                         cur.execute("""
                             INSERT INTO trustee_votes (
