@@ -754,7 +754,7 @@ def run_ai(key: str):
         )
 
     result = subprocess.run(
-        ["python", "ai_classifier.py", "--limit", "1000"],
+        ["python", "ai_classifier.py", "--limit", "50"],
         capture_output=True,
         text=True
     )
