@@ -616,7 +616,6 @@ else:
 html_out += f"""
         </div>
 
-        <form class="filters" action="/search" method="get">
             <input
                 name="q"
                 value="{esc(q)}"
