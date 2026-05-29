@@ -43,6 +43,11 @@ import psycopg2
 import psycopg2.extras
 from openai import OpenAI
 
+import os
+
+print("OPENAI_API_KEY exists:", "OPENAI_API_KEY" in os.environ)
+print("Available vars:", list(os.environ.keys()))
+
 DATABASE_URL = os.environ.get("DATABASE_URL")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 AI_MODEL = os.environ.get("AI_MODEL", "gpt-4.1-mini")
