@@ -755,7 +755,7 @@ def run_ai(key: str):
         )
 
     subprocess.Popen(
-        ["python", "ai_classifier.py", "--limit", "50"]
+        ["python", "ai_classifier.py", "--limit", "25"]
     )
 
     return {
