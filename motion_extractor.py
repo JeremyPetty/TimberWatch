@@ -1,6 +1,7 @@
 import os
 import json
 import psycopg2
+import argparse
 from openai import OpenAI
 from dotenv import load_dotenv
 
@@ -206,7 +207,12 @@ def insert_motions(document_id, motions):
 
 
 def main():
-    docs = get_unprocessed_documents(limit=5)
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--limit", type=int, default=25)
+    args = parser.parse_args()
+
+    docs = get_unprocessed_documents(limit=args.limit)
 
     if not docs:
         print("No unprocessed documents found.")
