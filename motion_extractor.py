@@ -33,9 +33,9 @@ def get_unprocessed_documents(limit=5):
     sql = """
         SELECT 
             d.id,
-            COALESCE(d.title, d.name, 'Untitled Document') AS title,
+            COALESCE(d.name, 'Untitled Document') AS title,
             d.text_content,
-            d.meeting_date
+            NULL AS meeting_date
         FROM documents d
         WHERE d.text_content IS NOT NULL
           AND LENGTH(d.text_content) > 100
