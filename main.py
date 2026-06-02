@@ -11,6 +11,22 @@ DATABASE_URL = os.environ["DATABASE_URL"]
 
 app = FastAPI()
 
+
+def get_conn():
+    return psycopg2.connect(DATABASE_URL)
+
+
+def esc(value):
+    return html.escape(str(value or ""), quote=True)
+
+
+def search_url(**kwargs):
+    clean = {k: v for k, v in kwargs.items() if v not in (None, "")}
+    if not clean:
+        return "/search"
+    return "/search?" + urlencode(clean)
+
+
 def get_trustee_scorecard():
     sql = """
         SELECT
@@ -63,24 +79,10 @@ def get_trustee_scorecard():
         ORDER BY trustee_name;
     """
 
-    with get_db_connection() as conn:
+    with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(sql)
             return cur.fetchall()
-            
-def get_conn():
-    return psycopg2.connect(DATABASE_URL)
-
-
-def esc(value):
-    return html.escape(str(value or ""), quote=True)
-
-
-def search_url(**kwargs):
-    clean = {k: v for k, v in kwargs.items() if v not in (None, "")}
-    if not clean:
-        return "/search"
-    return "/search?" + urlencode(clean)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -99,8 +101,11 @@ def status():
                 cur.execute("SELECT COUNT(*) FROM motions")
                 motion_count = cur.fetchone()[0]
 
-                cur.execute("SELECT COUNT(*) FROM trustee_votes")
-                trustee_vote_count = cur.fetchone()[0]
+                try:
+                    cur.execute("SELECT COUNT(*) FROM trustee_votes")
+                    trustee_vote_count = cur.fetchone()[0]
+                except Exception:
+                    trustee_vote_count = "Table not found"
 
                 cur.execute("SELECT COUNT(*) FROM ai_document_classifications")
                 ai_count = cur.fetchone()[0]
@@ -191,18 +196,18 @@ def search(
 
                 cur.execute("""
                     SELECT COUNT(*)
-                    FROM trustee_votes
-                    WHERE vote ILIKE '%abstain%'
-                       OR vote ILIKE '%abstention%'
+                    FROM motions
+                    WHERE abstains IS NOT NULL
+                      AND abstains <> ''
                 """)
                 dashboard["abstentions"] = cur.fetchone()[0]
 
                 cur.execute("""
-                    SELECT topic, COUNT(*)
+                    SELECT topic_category, COUNT(*)
                     FROM motions
-                    WHERE topic IS NOT NULL
-                      AND topic <> ''
-                    GROUP BY topic
+                    WHERE topic_category IS NOT NULL
+                      AND topic_category <> ''
+                    GROUP BY topic_category
                     ORDER BY COUNT(*) DESC
                     LIMIT 5
                 """)
@@ -210,29 +215,23 @@ def search(
 
                 cur.execute("""
                     SELECT DISTINCT trustee_name
-                    FROM trustee_votes
+                    FROM (
+                        SELECT TRIM(unnest(string_to_array(COALESCE(ayes, ''), ','))) AS trustee_name FROM motions
+                        UNION
+                        SELECT TRIM(unnest(string_to_array(COALESCE(nays, ''), ','))) AS trustee_name FROM motions
+                        UNION
+                        SELECT TRIM(unnest(string_to_array(COALESCE(abstains, ''), ','))) AS trustee_name FROM motions
+                        UNION
+                        SELECT TRIM(unnest(string_to_array(COALESCE(absent, ''), ','))) AS trustee_name FROM motions
+                    ) x
                     WHERE trustee_name IS NOT NULL
                       AND trustee_name <> ''
                     ORDER BY trustee_name
                 """)
                 dashboard["trustees"] = cur.fetchall()
 
-                cur.execute("""
-                    SELECT
-                        trustee_name,
-                        COUNT(*) FILTER (WHERE vote ILIKE 'yes') AS ayes,
-                        COUNT(*) FILTER (WHERE vote ILIKE 'no') AS nays,
-                        COUNT(*) FILTER (WHERE vote ILIKE 'abstain' OR vote ILIKE 'abstention') AS abstains,
-                        COUNT(*) FILTER (WHERE vote ILIKE 'absent') AS absents
-                    FROM trustee_votes
-                    WHERE trustee_name IS NOT NULL
-                      AND trustee_name <> ''
-                    GROUP BY trustee_name
-                    ORDER BY trustee_name
-                """)
-                dashboard["trustee_scorecard"] = cur.fetchall()
+                dashboard["trustee_scorecard"] = get_trustee_scorecard()
 
-                # AI-powered dashboard counts
                 cur.execute("SELECT COUNT(*) FROM ai_document_classifications")
                 dashboard["ai_classified"] = cur.fetchone()[0]
 
@@ -320,12 +319,10 @@ def search(
                     elif view == "abstentions":
                         where_parts.append("""
                             id IN (
-                                SELECT m.document_id
-                                FROM motions m
-                                JOIN trustee_votes tv
-                                  ON tv.motion_id = m.id
-                                WHERE tv.vote ILIKE '%abstain%'
-                                   OR tv.vote ILIKE '%abstention%'
+                                SELECT document_id
+                                FROM motions
+                                WHERE abstains IS NOT NULL
+                                  AND abstains <> ''
                             )
                         """)
 
@@ -368,32 +365,62 @@ def search(
                         """)
 
                     if trustee and vote:
-                        where_parts.append("""
-                            id IN (
-                                SELECT m.document_id
-                                FROM motions m
-                                JOIN trustee_votes tv
-                                  ON tv.motion_id = m.id
-                                WHERE tv.trustee_name ILIKE %s
-                                  AND tv.vote ILIKE %s
-                            )
-                        """)
-                        params.extend([f"%{trustee}%", vote])
+                        if vote.lower().startswith("yes"):
+                            where_parts.append("""
+                                id IN (
+                                    SELECT document_id
+                                    FROM motions
+                                    WHERE ayes ILIKE %s
+                                )
+                            """)
+                        elif vote.lower().startswith("no"):
+                            where_parts.append("""
+                                id IN (
+                                    SELECT document_id
+                                    FROM motions
+                                    WHERE nays ILIKE %s
+                                )
+                            """)
+                        elif vote.lower().startswith("abstain"):
+                            where_parts.append("""
+                                id IN (
+                                    SELECT document_id
+                                    FROM motions
+                                    WHERE abstains ILIKE %s
+                                )
+                            """)
+                        elif vote.lower().startswith("absent"):
+                            where_parts.append("""
+                                id IN (
+                                    SELECT document_id
+                                    FROM motions
+                                    WHERE absent ILIKE %s
+                                )
+                            """)
+                        params.append(f"%{trustee}%")
 
                     elif trustee:
                         where_parts.append("""
                             (
                                 text_content ILIKE %s
                                 OR id IN (
-                                    SELECT m.document_id
-                                    FROM motions m
-                                    JOIN trustee_votes tv
-                                      ON tv.motion_id = m.id
-                                    WHERE tv.trustee_name ILIKE %s
+                                    SELECT document_id
+                                    FROM motions
+                                    WHERE ayes ILIKE %s
+                                       OR nays ILIKE %s
+                                       OR abstains ILIKE %s
+                                       OR absent ILIKE %s
                                 )
                             )
                         """)
-                        params.extend([f"%{trustee}%", f"%{trustee}%"])
+                        trustee_param = f"%{trustee}%"
+                        params.extend([
+                            trustee_param,
+                            trustee_param,
+                            trustee_param,
+                            trustee_param,
+                            trustee_param,
+                        ])
 
                     where_sql = " AND ".join(where_parts) if where_parts else "TRUE"
                     search_query_for_rank = q if q else ""
@@ -540,6 +567,27 @@ def search(
 
             .actions a {{
                 white-space: nowrap;
+            }}
+
+            .backlog-grid {{
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+                gap: 12px;
+            }}
+
+            .backlog-card {{
+                background: #fff;
+                border: 1px solid #ddd;
+                border-radius: 8px;
+                padding: 12px;
+            }}
+
+            .backlog-card h4 {{
+                margin-top: 0;
+            }}
+
+            .backlog-card ul {{
+                margin-bottom: 0;
             }}
         </style>
     </head>
@@ -779,6 +827,91 @@ def search(
         <br>
 
         <div class="card">
+            <h3>Project Backlog / Roadmap</h3>
+
+            <div class="backlog-grid">
+                <div class="backlog-card">
+                    <h4>Current Sprint</h4>
+                    <ul>
+                        <li>Finish motion-level extraction</li>
+                        <li>Validate AI motion quality</li>
+                        <li>Improve consent agenda detection</li>
+                        <li>Improve trustee vote extraction</li>
+                        <li>Confirm scorecard counts against source documents</li>
+                    </ul>
+                </div>
+
+                <div class="backlog-card">
+                    <h4>Search Improvements</h4>
+                    <ul>
+                        <li>Search motions directly</li>
+                        <li>Search failed motions</li>
+                        <li>Search abstentions</li>
+                        <li>Search by trustee</li>
+                        <li>Improve highlighted snippets</li>
+                        <li>Add motion-specific result cards</li>
+                    </ul>
+                </div>
+
+                <div class="backlog-card">
+                    <h4>Download Cart</h4>
+                    <ul>
+                        <li>Add checkbox next to each result</li>
+                        <li>Add selected documents to cart</li>
+                        <li>Keep cart across multiple searches</li>
+                        <li>View and remove cart items</li>
+                        <li>Download selected PDFs as one ZIP file</li>
+                        <li>Include manifest CSV in ZIP</li>
+                    </ul>
+                </div>
+
+                <div class="backlog-card">
+                    <h4>Trustee Analytics</h4>
+                    <ul>
+                        <li>Trustee profile pages</li>
+                        <li>Consensus scores</li>
+                        <li>Trustee influence scores</li>
+                        <li>Rare dissent tracker</li>
+                        <li>Voting alliance patterns</li>
+                    </ul>
+                </div>
+
+                <div class="backlog-card">
+                    <h4>Governance Analytics</h4>
+                    <ul>
+                        <li>Topic heatmaps over time</li>
+                        <li>Failed motion analysis</li>
+                        <li>Election-cycle governance shifts</li>
+                        <li>Consent agenda trend analysis</li>
+                        <li>Brown Act concern indicators</li>
+                    </ul>
+                </div>
+
+                <div class="backlog-card">
+                    <h4>Vendor / Department Tracking</h4>
+                    <ul>
+                        <li>Track vendors across motions</li>
+                        <li>Track contract dollar amounts</li>
+                        <li>Track departments tied to motions</li>
+                        <li>Build vendor timeline pages</li>
+                        <li>Flag recurring vendors and amendments</li>
+                    </ul>
+                </div>
+
+                <div class="backlog-card">
+                    <h4>AI Features</h4>
+                    <ul>
+                        <li>Motion summaries</li>
+                        <li>Motion similarity search</li>
+                        <li>AI timelines by topic</li>
+                        <li>Natural-language question answering</li>
+                        <li>Human review queue</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
             <h3>Definitions</h3>
             <p><b>Total Documents:</b> Number of indexed PDFs/documents currently in TimberWatch.</p>
             <p><b>Total Motions:</b> Motions extracted from board minutes.</p>
@@ -801,7 +934,6 @@ def search(
 
 @app.get("/run-ai")
 def run_ai(key: str):
-
     admin_key = os.environ.get("ADMIN_KEY")
 
     if key != admin_key:
@@ -816,5 +948,5 @@ def run_ai(key: str):
 
     return {
         "status": "AI classifier started",
-        "limit": 50
+        "limit": 25
     }
