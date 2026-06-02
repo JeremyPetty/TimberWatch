@@ -44,9 +44,18 @@ def get_unprocessed_documents(limit=25):
               FROM motions m
               WHERE m.document_id = d.id
           )
-        ORDER BY d.id
-        LIMIT %s;
-    """
+        ORDER BY
+            CASE
+                WHEN d.document_type ILIKE '%minutes%' THEN 1
+                WHEN d.name ILIKE '%minutes%' THEN 1
+                WHEN d.document_type ILIKE '%agenda%' THEN 2
+                WHEN d.name ILIKE '%agenda%' THEN 2
+                ELSE 3
+            END,
+            d.meeting_date DESC NULLS LAST,
+            d.id
+                LIMIT %s;
+            """
 
     with get_connection() as conn:
         with conn.cursor() as cur:
