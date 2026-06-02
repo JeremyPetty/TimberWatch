@@ -11,7 +11,63 @@ DATABASE_URL = os.environ["DATABASE_URL"]
 
 app = FastAPI()
 
+def get_trustee_scorecard():
+    sql = """
+        SELECT
+            trustee_name,
+            SUM(aye_count) AS ayes,
+            SUM(nay_count) AS nays,
+            SUM(abstain_count) AS abstains,
+            SUM(absent_count) AS absents
+        FROM (
+            SELECT TRIM(unnest(string_to_array(COALESCE(ayes, ''), ','))) AS trustee_name,
+                   1 AS aye_count,
+                   0 AS nay_count,
+                   0 AS abstain_count,
+                   0 AS absent_count
+            FROM motions
+            WHERE COALESCE(ayes, '') <> ''
 
+            UNION ALL
+
+            SELECT TRIM(unnest(string_to_array(COALESCE(nays, ''), ','))) AS trustee_name,
+                   0 AS aye_count,
+                   1 AS nay_count,
+                   0 AS abstain_count,
+                   0 AS absent_count
+            FROM motions
+            WHERE COALESCE(nays, '') <> ''
+
+            UNION ALL
+
+            SELECT TRIM(unnest(string_to_array(COALESCE(abstains, ''), ','))) AS trustee_name,
+                   0 AS aye_count,
+                   0 AS nay_count,
+                   1 AS abstain_count,
+                   0 AS absent_count
+            FROM motions
+            WHERE COALESCE(abstains, '') <> ''
+
+            UNION ALL
+
+            SELECT TRIM(unnest(string_to_array(COALESCE(absent, ''), ','))) AS trustee_name,
+                   0 AS aye_count,
+                   0 AS nay_count,
+                   0 AS abstain_count,
+                   1 AS absent_count
+            FROM motions
+            WHERE COALESCE(absent, '') <> ''
+        ) x
+        WHERE trustee_name <> ''
+        GROUP BY trustee_name
+        ORDER BY trustee_name;
+    """
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql)
+            return cur.fetchall()
+            
 def get_conn():
     return psycopg2.connect(DATABASE_URL)
 
