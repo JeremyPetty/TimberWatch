@@ -3,9 +3,6 @@ import json
 import argparse
 import psycopg2
 from openai import OpenAI
-from dotenv import load_dotenv
-
-load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -19,187 +16,117 @@ if not OPENAI_API_KEY:
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 
-def get_connection():
+def get_conn():
     return psycopg2.connect(DATABASE_URL)
 
 
-def get_unprocessed_documents(limit=25):
-    """
-    Pull documents that do not already have extracted motions.
-    This version assumes your documents table has:
-    id, name, text_content.
-    """
+def ensure_motion_tracking_columns(cur):
+    cur.execute("""
+        ALTER TABLE documents
+        ADD COLUMN IF NOT EXISTS motion_processed BOOLEAN DEFAULT FALSE,
+        ADD COLUMN IF NOT EXISTS motion_processed_at TIMESTAMP,
+        ADD COLUMN IF NOT EXISTS motion_process_notes TEXT;
+    """)
 
-    sql = """
-        SELECT
-            d.id,
-            COALESCE(d.name, 'Untitled Document') AS title,
-            d.text_content,
-            NULL AS meeting_date
-        FROM documents d
-        WHERE d.text_content IS NOT NULL
-          AND LENGTH(d.text_content) > 100
-          AND NOT EXISTS (
-                SELECT 1
-                FROM motion_processing_status s
-                WHERE s.document_id = d.id
-            )
-          )
-        ORDER BY d.id
+
+def fetch_documents(cur, limit):
+    cur.execute("""
+        SELECT id, name, text_content, meeting_date, document_type
+        FROM documents
+        WHERE motion_processed = FALSE
+          AND text_content IS NOT NULL
+          AND length(text_content) > 100
+        ORDER BY id
         LIMIT %s;
-    """
-
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(sql, (limit,))
-            return cur.fetchall()
+    """, (limit,))
+    return cur.fetchall()
 
 
-def extract_motions_with_ai(document_title, meeting_date, text_content):
+def extract_motions_with_ai(doc_name, text_content):
+    trimmed_text = text_content[:45000]
+
     prompt = f"""
-You are analyzing public board meeting documents.
+You are extracting Board of Trustees motions from a public meeting document.
 
-Extract every formal motion from the document text.
+Document name:
+{doc_name}
 
-Return ONLY valid JSON in this exact structure:
+Extract any board motions, recommended actions, approvals, resolutions, consent items, action items, vote outcomes, moved/seconded information, ayes, nays, abstains, and absent trustees.
+
+Return ONLY valid JSON in this format:
 
 {{
   "motions": [
     {{
-      "meeting_date": "",
-      "agenda_item": "",
-      "motion_text": "",
-      "moved_by": "",
-      "seconded_by": "",
-      "vote_result": "",
-      "ayes": "",
-      "nays": "",
-      "abstains": "",
-      "absent": "",
-      "topic_category": "",
-      "consent_agenda": false,
-      "dollar_amount": "",
-      "vendor_or_department": "",
+      "meeting_date": "YYYY-MM-DD or null",
+      "agenda_item_id": "string or null",
+      "motion_text": "string",
+      "moved_by": "string or null",
+      "seconded_by": "string or null",
+      "vote_result": "Approved, Failed, Passed, No Action, Unknown, or null",
+      "topic": "string or null",
+      "agenda_item": "string or null",
+      "ayes": "comma-separated names or null",
+      "nays": "comma-separated names or null",
+      "abstains": "comma-separated names or null",
+      "absent": "comma-separated names or null",
+      "topic_category": "Personnel, Contract, Budget, Policy, Facilities, Academic, Student Services, Governance, Resolution, Consent, Other, or null",
+      "consent_agenda": true or false,
+      "dollar_amount": "numeric amount or null",
+      "vendor_or_department": "string or null",
       "confidence_score": 0.0,
-      "source_excerpt": ""
+      "source_excerpt": "short supporting excerpt"
     }}
   ]
 }}
 
-GENERAL RULES:
-- Extract formal motions only, not general discussion.
-- If no motions are found, return {{"motions": []}}.
-- Do not invent names, dates, dollar amounts, or votes.
-- Leave unknown fields blank.
-- confidence_score must be between 0 and 1.
-- source_excerpt should be a short nearby excerpt from the document showing where the motion came from.
-
-MOTION RULES:
-- motion_text should describe the actual action voted on.
-- moved_by should contain the person who moved the item, if listed.
-- seconded_by should contain the person who seconded the item, if listed.
-- vote_result should be one of: Approved, Failed, Tabled, Pulled, No Action, Unknown.
-- topic_category should be a short category such as Personnel, Finance, Contract, Policy, Curriculum, Facilities, Governance, Consent Agenda, Legal, Student Services, Other.
-- consent_agenda should be true if the item appears to be part of a consent agenda or consent calendar.
-- dollar_amount should include any dollar amount tied to the motion, if present.
-- vendor_or_department should include the vendor, department, employee group, or office tied to the motion, if present.
-
-IMPORTANT TRUSTEE VOTE RULES:
-- Extract individual trustee names whenever the document lists them.
-- Put trustees voting yes, aye, or approving in the "ayes" field.
-- Put trustees voting no, nay, or opposing in the "nays" field.
-- Put trustees abstaining in the "abstains" field.
-- Put trustees absent in the "absent" field.
-- Store multiple trustee names as comma-separated values.
-- Example: "John Doe, Jane Smith, Robert Jones"
-- Preserve names as written in the document when possible.
-- If the document says "Ayes: X, Y, Z" then put X, Y, Z in ayes.
-- If the document says "Noes:" or "Nays:" then put those names in nays.
-- If the document says "Absent:" then put those names in absent.
-- If the document says "Abstain:" or "Abstentions:" then put those names in abstains.
-- If the document only says "motion carried unanimously" but does not list names, leave ayes blank unless the same excerpt clearly lists all voting trustees present.
-- If the document lists board members present and says a specific motion was unanimous, you may use the present board members as ayes only when the text clearly supports that they were voting members and no abstentions/absences are listed for that motion.
-- Do not put staff names, presenters, vendors, or administrators into trustee vote fields unless they are clearly board/trustee voters.
-
-COMMON BOARD MINUTES PATTERNS TO WATCH FOR:
-- "Motion by Smith, seconded by Jones, carried unanimously."
-- "Ayes: Smith, Jones, Brown. Noes: Garcia. Abstain: Lee. Absent: Miller."
-- "The motion passed 5-0."
-- "MSC Smith/Jones to approve..."
-- "It was moved by Trustee Smith and seconded by Trustee Jones..."
-
-Document title:
-{document_title}
-
-Meeting date:
-{meeting_date}
+Important:
+- Include consent agenda approvals if they represent board action.
+- Include recommended actions even when the document does not show the final vote.
+- If no motions/actions are present, return: {{"motions": []}}
+- Do not invent trustee names.
+- Do not include commentary outside JSON.
 
 Document text:
-{text_content[:50000]}
+{trimmed_text}
 """
 
     response = client.chat.completions.create(
-        model="gpt-4.1-mini",
-        messages=[
-            {
-                "role": "system",
-                "content": "You extract structured motion and trustee vote data from board meeting documents. Return only valid JSON."
-            },
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ],
+        model="gpt-4o-mini",
         temperature=0,
+        response_format={"type": "json_object"},
+        messages=[
+            {"role": "system", "content": "You extract structured board motion data as valid JSON only."},
+            {"role": "user", "content": prompt}
+        ],
     )
 
-    raw = response.choices[0].message.content.strip()
+    content = response.choices[0].message.content
+    data = json.loads(content)
 
-    # Remove common code fence wrapping if the model returns it despite instructions.
-    if raw.startswith("```"):
-        raw = raw.strip("`")
-        raw = raw.replace("json\n", "", 1).replace("JSON\n", "", 1).strip()
-
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        print("AI returned invalid JSON:")
-        print(raw)
-        return {"motions": []}
+    return data.get("motions", [])
 
 
-def normalize_motion(motion):
-    """Normalize one AI motion object before inserting."""
-    return {
-        "meeting_date": motion.get("meeting_date") or None,
-        "agenda_item": motion.get("agenda_item") or None,
-        "motion_text": motion.get("motion_text") or None,
-        "moved_by": motion.get("moved_by") or None,
-        "seconded_by": motion.get("seconded_by") or None,
-        "vote_result": motion.get("vote_result") or None,
-        "ayes": motion.get("ayes") or None,
-        "nays": motion.get("nays") or None,
-        "abstains": motion.get("abstains") or None,
-        "absent": motion.get("absent") or None,
-        "topic_category": motion.get("topic_category") or None,
-        "consent_agenda": bool(motion.get("consent_agenda", False)),
-        "dollar_amount": motion.get("dollar_amount") or None,
-        "vendor_or_department": motion.get("vendor_or_department") or None,
-        "confidence_score": motion.get("confidence_score"),
-        "source_excerpt": motion.get("source_excerpt") or None,
-    }
+def clean_value(value):
+    if value in ("", "null", "None"):
+        return None
+    return value
 
 
-def insert_motions(document_id, motions):
-    sql = """
+def insert_motion(cur, document_id, fallback_meeting_date, motion):
+    meeting_date = clean_value(motion.get("meeting_date")) or fallback_meeting_date
+
+    cur.execute("""
         INSERT INTO motions (
             document_id,
             meeting_date,
-            agenda_item,
+            agenda_item_id,
             motion_text,
             moved_by,
             seconded_by,
             vote_result,
+            topic,
+            agenda_item,
             ayes,
             nays,
             abstains,
@@ -212,95 +139,104 @@ def insert_motions(document_id, motions):
             source_excerpt
         )
         VALUES (
-            %(document_id)s,
-            %(meeting_date)s,
-            %(agenda_item)s,
-            %(motion_text)s,
-            %(moved_by)s,
-            %(seconded_by)s,
-            %(vote_result)s,
-            %(ayes)s,
-            %(nays)s,
-            %(abstains)s,
-            %(absent)s,
-            %(topic_category)s,
-            %(consent_agenda)s,
-            %(dollar_amount)s,
-            %(vendor_or_department)s,
-            %(confidence_score)s,
-            %(source_excerpt)s
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+            %s, %s, %s, %s, %s, %s, %s, %s, %s
         );
-    """
+    """, (
+        document_id,
+        meeting_date,
+        clean_value(motion.get("agenda_item_id")),
+        clean_value(motion.get("motion_text")),
+        clean_value(motion.get("moved_by")),
+        clean_value(motion.get("seconded_by")),
+        clean_value(motion.get("vote_result")),
+        clean_value(motion.get("topic")),
+        clean_value(motion.get("agenda_item")),
+        clean_value(motion.get("ayes")),
+        clean_value(motion.get("nays")),
+        clean_value(motion.get("abstains")),
+        clean_value(motion.get("absent")),
+        clean_value(motion.get("topic_category")),
+        bool(motion.get("consent_agenda")) if motion.get("consent_agenda") is not None else False,
+        clean_value(motion.get("dollar_amount")),
+        clean_value(motion.get("vendor_or_department")),
+        motion.get("confidence_score"),
+        clean_value(motion.get("source_excerpt")),
+    ))
 
-    rows = []
 
-    for motion in motions:
-        clean_motion = normalize_motion(motion)
-        clean_motion["document_id"] = document_id
-        rows.append(clean_motion)
+def mark_document_processed(cur, document_id, note):
+    cur.execute("""
+        UPDATE documents
+        SET motion_processed = TRUE,
+            motion_processed_at = NOW(),
+            motion_process_notes = %s
+        WHERE id = %s;
+    """, (note, document_id))
 
-    if not rows:
-        return 0
-
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.executemany(sql, rows)
-        conn.commit()
-
-    return len(rows)
-
-def mark_document_processed(document_id, motions_found):
-    sql = """
-        INSERT INTO motion_processing_status (
-            document_id,
-            motions_found,
-            status
-        )
-        VALUES (%s, %s, 'processed')
-        ON CONFLICT (document_id)
-        DO UPDATE SET
-            processed_at = CURRENT_TIMESTAMP,
-            motions_found = EXCLUDED.motions_found,
-            status = EXCLUDED.status;
-    """
-
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(sql, (document_id, motions_found))
-        conn.commit()
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=25)
     args = parser.parse_args()
 
-    docs = get_unprocessed_documents(limit=args.limit)
+    conn = get_conn()
 
-    if not docs:
-        print("No unprocessed documents found.")
-        return
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                ensure_motion_tracking_columns(cur)
 
-    for document_id, title, text_content, meeting_date in docs:
-        print(f"\nProcessing document {document_id}: {title}")
+        with conn:
+            with conn.cursor() as cur:
+                docs = fetch_documents(cur, args.limit)
 
-        result = extract_motions_with_ai(
-            document_title=title,
-            meeting_date=meeting_date,
-            text_content=text_content
-        )
+        if not docs:
+            print("No unprocessed documents found.")
+            return
 
-        motions = result.get("motions", [])
-        inserted = insert_motions(document_id, motions)
-        mark_document_processed(document_id, inserted)
-        
-        print(f"Inserted {inserted} motions.")
+        for doc_id, name, text_content, meeting_date, document_type in docs:
+            print(f"Processing document {doc_id}: {name}")
 
-        if motions:
-            with_votes = sum(
-                1 for m in motions
-                if m.get("ayes") or m.get("nays") or m.get("abstains") or m.get("absent")
-            )
-            print(f"Motions with trustee vote names: {with_votes}")
+            inserted_count = 0
+
+            try:
+                motions = extract_motions_with_ai(name, text_content)
+
+                with conn:
+                    with conn.cursor() as cur:
+                        for motion in motions:
+                            motion_text = clean_value(motion.get("motion_text"))
+
+                            if not motion_text:
+                                continue
+
+                            insert_motion(cur, doc_id, meeting_date, motion)
+                            inserted_count += 1
+
+                        mark_document_processed(
+                            cur,
+                            doc_id,
+                            f"completed: inserted {inserted_count} motions"
+                        )
+
+                print(f"Inserted {inserted_count} motions.")
+
+            except Exception as e:
+                error_message = str(e)[:500]
+
+                with conn:
+                    with conn.cursor() as cur:
+                        mark_document_processed(
+                            cur,
+                            doc_id,
+                            f"error: {error_message}"
+                        )
+
+                print(f"ERROR processing document {doc_id}: {error_message}")
+
+    finally:
+        conn.close()
 
 
 if __name__ == "__main__":
