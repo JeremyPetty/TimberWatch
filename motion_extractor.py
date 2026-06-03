@@ -40,9 +40,10 @@ def get_unprocessed_documents(limit=25):
         WHERE d.text_content IS NOT NULL
           AND LENGTH(d.text_content) > 100
           AND NOT EXISTS (
-              SELECT 1
-              FROM motions m
-              WHERE m.document_id = d.id
+                SELECT 1
+                FROM motion_processing_status s
+                WHERE s.document_id = d.id
+            )
           )
         ORDER BY d.id
         LIMIT %s;
@@ -248,6 +249,25 @@ def insert_motions(document_id, motions):
 
     return len(rows)
 
+def mark_document_processed(document_id, motions_found):
+    sql = """
+        INSERT INTO motion_processing_status (
+            document_id,
+            motions_found,
+            status
+        )
+        VALUES (%s, %s, 'processed')
+        ON CONFLICT (document_id)
+        DO UPDATE SET
+            processed_at = CURRENT_TIMESTAMP,
+            motions_found = EXCLUDED.motions_found,
+            status = EXCLUDED.status;
+    """
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (document_id, motions_found))
+        conn.commit()
 
 def main():
     parser = argparse.ArgumentParser()
@@ -271,7 +291,8 @@ def main():
 
         motions = result.get("motions", [])
         inserted = insert_motions(document_id, motions)
-
+        mark_document_processed(document_id, inserted)
+        
         print(f"Inserted {inserted} motions.")
 
         if motions:
