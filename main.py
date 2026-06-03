@@ -30,12 +30,13 @@ def search_url(**kwargs):
 def get_trustee_scorecard():
     sql = """
         SELECT
-            trustee_name,
-            SUM(aye_count) AS ayes,
-            SUM(nay_count) AS nays,
-            SUM(abstain_count) AS abstains,
-            SUM(absent_count) AS absents
-        FROM (
+            t.name AS trustee_name,
+            COALESCE(SUM(x.aye_count), 0) AS ayes,
+            COALESCE(SUM(x.nay_count), 0) AS nays,
+            COALESCE(SUM(x.abstain_count), 0) AS abstains,
+            COALESCE(SUM(x.absent_count), 0) AS absents
+        FROM trustees t
+        LEFT JOIN (
             SELECT TRIM(unnest(string_to_array(COALESCE(ayes, ''), ','))) AS trustee_name,
                    1 AS aye_count,
                    0 AS nay_count,
@@ -74,10 +75,16 @@ def get_trustee_scorecard():
             FROM motions
             WHERE COALESCE(absent, '') <> ''
         ) x
-        WHERE trustee_name <> ''
-        GROUP BY trustee_name
-        ORDER BY trustee_name;
+            ON LOWER(TRIM(x.trustee_name)) = LOWER(TRIM(t.name))
+        WHERE t.is_current = TRUE
+        GROUP BY t.name, t.ward
+        ORDER BY t.ward, t.name;
     """
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql)
+            return cur.fetchall()
 
     with get_conn() as conn:
         with conn.cursor() as cur:
@@ -214,19 +221,10 @@ def search(
                 dashboard["topics"] = cur.fetchall()
 
                 cur.execute("""
-                    SELECT DISTINCT trustee_name
-                    FROM (
-                        SELECT TRIM(unnest(string_to_array(COALESCE(ayes, ''), ','))) AS trustee_name FROM motions
-                        UNION
-                        SELECT TRIM(unnest(string_to_array(COALESCE(nays, ''), ','))) AS trustee_name FROM motions
-                        UNION
-                        SELECT TRIM(unnest(string_to_array(COALESCE(abstains, ''), ','))) AS trustee_name FROM motions
-                        UNION
-                        SELECT TRIM(unnest(string_to_array(COALESCE(absent, ''), ','))) AS trustee_name FROM motions
-                    ) x
-                    WHERE trustee_name IS NOT NULL
-                      AND trustee_name <> ''
-                    ORDER BY trustee_name
+                    SELECT name
+                    FROM trustees
+                    WHERE is_current = TRUE
+                    ORDER BY ward, name
                 """)
                 dashboard["trustees"] = cur.fetchall()
 
