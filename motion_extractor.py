@@ -145,7 +145,7 @@ def insert_motion(cur, document_id, fallback_meeting_date, motion):
     """, (
         document_id,
         meeting_date,
-        clean_value(motion.get("agenda_item_id")),
+        None,
         clean_value(motion.get("motion_text")),
         clean_value(motion.get("moved_by")),
         clean_value(motion.get("seconded_by")),
