@@ -42,7 +42,7 @@ def fetch_motions(conn, limit):
                 m.id,
                 m.motion_text,
                 m.document_id,
-                COALESCE(d.title, d.file_name, '') AS document_title,
+                COALESCE(d.name, d.url, '') AS document_title,
                 COALESCE(d.text_content, '') AS document_text
             FROM motions m
             JOIN documents d
