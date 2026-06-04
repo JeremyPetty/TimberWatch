@@ -1,87 +1,46 @@
-import os
-import psycopg2
+import argparse
+from db import get_cursor
 
-DATABASE_URL = os.environ["DATABASE_URL"]
-
-TRUSTEES = [
-    {"name": "Robert Aguilar", "role": "Trustee", "ward": "Ward 1", "current": True},
-    {"name": "Ken Nunes", "role": "Clerk", "ward": "Ward 2", "current": True},
-    {"name": "Raymond Macareno", "role": "President", "ward": "Ward 3", "current": True},
-    {"name": "Connie Diaz", "role": "Trustee", "ward": "Ward 4", "current": True},
-    {"name": "John Lehn", "role": "Vice President", "ward": "Ward 5", "current": True},
-    {"name": "Elizabeth Martinez", "role": "Student Trustee", "ward": "2025-2026", "current": True},
-
-    {"name": "Greg Sherman", "role": "Former Trustee", "ward": None, "current": False},
+CURRENT_TRUSTEES = [
+    ("Greg Sherman", "Ward 1", True),
+    ("Ken Nunes", "Ward 2", True),
+    ("Raymond Macareno", "Ward 3", True),
+    ("Connie Diaz", "Ward 4", True),
+    ("John Lehn", "Ward 5", True),
 ]
 
-
-def get_conn():
-    return psycopg2.connect(DATABASE_URL)
-
-
-def build_aliases(full_name):
-    parts = full_name.split()
-    last = parts[-1]
-
-    return list(set([
-        full_name,
-        last,
-        f"Trustee {last}",
-        f"Mr. {last}",
-        f"Ms. {last}",
-        f"Mrs. {last}",
-        f"Dr. {last}",
-    ]))
+ALIASES = {
+    "Greg Sherman": ["Sherman", "Trustee Sherman"],
+    "Ken Nunes": ["Nunes", "Trustee Nunes"],
+    "Raymond Macareno": ["Macareno", "Ray Macareno", "Trustee Macareno"],
+    "Connie Diaz": ["Diaz", "Trustee Diaz"],
+    "John Lehn": ["Lehn", "Trustee Lehn"],
+}
 
 
-def sync_trustees():
-    with get_conn() as conn:
-        with conn.cursor() as cur:
+def sync_trustees(mark_existing_not_current=False):
+    with get_cursor() as cur:
+        if mark_existing_not_current:
+            cur.execute("UPDATE trustees SET is_current=false")
+        for name, ward, is_current in CURRENT_TRUSTEES:
             cur.execute("""
-                CREATE TABLE IF NOT EXISTS trustee_aliases (
-                    id SERIAL PRIMARY KEY,
-                    trustee_id INTEGER REFERENCES trustees(id) ON DELETE CASCADE,
-                    alias TEXT UNIQUE NOT NULL
-                );
-            """)
-
-            for trustee in TRUSTEES:
+                INSERT INTO trustees(name, ward, is_current)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (name) DO UPDATE SET ward=EXCLUDED.ward, is_current=EXCLUDED.is_current
+                RETURNING id
+            """, [name, ward, is_current])
+            trustee_id = cur.fetchone()["id"]
+            for alias in ALIASES.get(name, []):
                 cur.execute("""
-                    INSERT INTO trustees (
-                        name,
-                        ward,
-                        is_current
-                    )
-                    VALUES (%s, %s, %s)
-                    ON CONFLICT (name)
-                    DO UPDATE SET
-                        ward = EXCLUDED.ward,
-                        is_current = EXCLUDED.is_current
-                    RETURNING id
-                """, (
-                    trustee["name"],
-                    trustee["ward"],
-                    trustee["current"],
-                ))
-
-                trustee_id = cur.fetchone()[0]
-
-                for alias in build_aliases(trustee["name"]):
-                    cur.execute("""
-                        INSERT INTO trustee_aliases (
-                            trustee_id,
-                            alias
-                        )
-                        VALUES (%s, %s)
-                        ON CONFLICT (alias)
-                        DO NOTHING
-                    """, (
-                        trustee_id,
-                        alias,
-                    ))
-
+                    INSERT INTO trustee_aliases(trustee_id, alias)
+                    VALUES (%s, %s)
+                    ON CONFLICT (alias) DO UPDATE SET trustee_id=EXCLUDED.trustee_id
+                """, [trustee_id, alias])
     print("Trustee sync complete.")
 
 
 if __name__ == "__main__":
-    sync_trustees()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mark-existing-not-current", action="store_true")
+    args = parser.parse_args()
+    sync_trustees(args.mark_existing_not_current)

@@ -1,243 +1,181 @@
-import os
-import json
+"""Extract motions, topics, sponsors, and trustee votes from document text.
+
+Run:
+  python motion_extractor.py --limit 25
+
+This script intentionally stores agenda_item_id as NULL unless you later add reliable agenda-item matching.
+That avoids foreign-key failures when an AI guesses agenda item numbers.
+"""
 import argparse
-import psycopg2
+import json
+import os
+import re
+
 from openai import OpenAI
 
-DATABASE_URL = os.getenv("DATABASE_URL")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+from db import get_cursor
+from utils import clean_snippet
 
-if not DATABASE_URL:
-    raise RuntimeError("Missing DATABASE_URL environment variable.")
+MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
-if not OPENAI_API_KEY:
-    raise RuntimeError("Missing OPENAI_API_KEY environment variable.")
-
-client = OpenAI(api_key=OPENAI_API_KEY)
-
-
-def get_conn():
-    return psycopg2.connect(DATABASE_URL)
+FALLBACK_TOPICS = [
+    "Budget", "Facilities", "Personnel", "Labor Relations", "Board Policy", "Student Services",
+    "Construction", "Contracts", "Governance", "Academic Affairs", "Technology"
+]
 
 
-def ensure_motion_tracking_columns(cur):
-    cur.execute("""
-        ALTER TABLE documents
-        ADD COLUMN IF NOT EXISTS motion_processed BOOLEAN DEFAULT FALSE,
-        ADD COLUMN IF NOT EXISTS motion_processed_at TIMESTAMP,
-        ADD COLUMN IF NOT EXISTS motion_process_notes TEXT;
-    """)
+def get_client():
+    if not os.getenv("OPENAI_API_KEY"):
+        raise RuntimeError("Missing OPENAI_API_KEY environment variable.")
+    return OpenAI()
 
 
-def fetch_documents(cur, limit):
-    cur.execute("""
-        SELECT id, name, text_content, meeting_date, document_type
-        FROM documents
-        WHERE motion_processed = FALSE
-          AND text_content IS NOT NULL
-          AND length(text_content) > 100
-        ORDER BY id
-        LIMIT %s;
-    """, (limit,))
-    return cur.fetchall()
+def normalize_vote(vote):
+    if not vote:
+        return "Unknown"
+    v = str(vote).strip().lower()
+    if v in ("aye", "ayes", "yes", "y"):
+        return "Yes"
+    if v in ("nay", "nays", "no", "n"):
+        return "No"
+    if "abstain" in v:
+        return "Abstain"
+    if "absent" in v:
+        return "Absent"
+    return vote.strip().title()
 
 
-def extract_motions_with_ai(doc_name, text_content):
-    trimmed_text = text_content[:45000]
+def find_trustee_id(name):
+    if not name:
+        return None
+    with get_cursor() as cur:
+        cur.execute("SELECT id FROM trustees WHERE LOWER(name)=LOWER(%s)", [name])
+        row = cur.fetchone()
+        if row:
+            return row["id"]
+        cur.execute("SELECT trustee_id AS id FROM trustee_aliases WHERE LOWER(alias)=LOWER(%s)", [name])
+        row = cur.fetchone()
+        return row["id"] if row else None
 
+
+def extract_with_ai(client, name, text):
     prompt = f"""
-You are extracting Board of Trustees motions from a public meeting document.
-
-Document name:
-{doc_name}
-
-Extract any board motions, recommended actions, approvals, resolutions, consent items, action items, vote outcomes, moved/seconded information, ayes, nays, abstains, and absent trustees.
-
-Return ONLY valid JSON in this format:
-
+Extract board meeting motions and trustee votes from this document.
+Return ONLY valid JSON in this structure:
 {{
   "motions": [
     {{
-      "meeting_date": "YYYY-MM-DD or null",
-      "agenda_item_id": "string or null",
-      "motion_text": "string",
-      "moved_by": "string or null",
-      "seconded_by": "string or null",
-      "vote_result": "Approved, Failed, Passed, No Action, Unknown, or null",
-      "topic": "string or null",
-      "agenda_item": "string or null",
-      "ayes": "comma-separated names or null",
-      "nays": "comma-separated names or null",
-      "abstains": "comma-separated names or null",
-      "absent": "comma-separated names or null",
-      "topic_category": "Personnel, Contract, Budget, Policy, Facilities, Academic, Student Services, Governance, Resolution, Consent, Other, or null",
-      "consent_agenda": true or false,
-      "dollar_amount": "numeric amount or null",
-      "vendor_or_department": "string or null",
-      "confidence_score": 0.0,
-      "source_excerpt": "short supporting excerpt"
+      "motion_text": "exact or summarized motion text",
+      "result": "Passed|Failed|Approved|Denied|Information Only|Unknown",
+      "topics": [{{"topic":"Budget", "confidence":0.90}}],
+      "sponsors": ["Trustee Name"],
+      "votes": [{{"trustee":"Trustee Name", "vote":"Yes|No|Abstain|Absent|Unknown"}}]
     }}
   ]
 }}
+Do not invent trustees. If the document does not contain motions, return an empty motions array.
+Use these broad topic examples when applicable: {', '.join(FALLBACK_TOPICS)}.
 
-Important:
-- Include consent agenda approvals if they represent board action.
-- Include recommended actions even when the document does not show the final vote.
-- If no motions/actions are present, return: {{"motions": []}}
-- Do not invent trustee names.
-- Do not include commentary outside JSON.
-
-Document text:
-{trimmed_text}
+Document: {name}
+Text excerpt:
+{clean_snippet(text or '', 12000)}
 """
-
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        temperature=0,
+    resp = client.chat.completions.create(
+        model=MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.1,
         response_format={"type": "json_object"},
-        messages=[
-            {"role": "system", "content": "You extract structured board motion data as valid JSON only."},
-            {"role": "user", "content": prompt}
-        ],
     )
-
-    content = response.choices[0].message.content
-    data = json.loads(content)
-
-    return data.get("motions", [])
+    return json.loads(resp.choices[0].message.content)
 
 
-def clean_value(value):
-    if value in ("", "null", "None"):
+def insert_motion(document_id, motion):
+    motion_text = clean_snippet(motion.get("motion_text") or "", 4000)
+    if not motion_text:
         return None
-    return value
+    with get_cursor() as cur:
+        cur.execute("""
+            INSERT INTO motions(document_id, agenda_item_id, motion_text, result, topic, created_at)
+            VALUES (%s, NULL, %s, %s, %s, CURRENT_TIMESTAMP)
+            RETURNING id
+        """, [document_id, motion_text, motion.get("result"), (motion.get("topics") or [{}])[0].get("topic") if motion.get("topics") else None])
+        motion_id = cur.fetchone()["id"]
+
+    for topic in motion.get("topics") or []:
+        topic_name = topic.get("topic") if isinstance(topic, dict) else str(topic)
+        confidence = topic.get("confidence") if isinstance(topic, dict) else None
+        if topic_name:
+            with get_cursor() as cur:
+                cur.execute("""
+                    INSERT INTO motion_topics(motion_id, topic, confidence)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (motion_id, topic) DO UPDATE SET confidence=EXCLUDED.confidence
+                """, [motion_id, topic_name, confidence])
+
+    for sponsor in motion.get("sponsors") or []:
+        trustee_id = find_trustee_id(sponsor)
+        with get_cursor() as cur:
+            cur.execute("""
+                INSERT INTO motion_sponsors(motion_id, trustee_id, sponsor_name)
+                VALUES (%s, %s, %s)
+                ON CONFLICT DO NOTHING
+            """, [motion_id, trustee_id, sponsor])
+
+    for vote in motion.get("votes") or []:
+        trustee_name = vote.get("trustee")
+        trustee_id = find_trustee_id(trustee_name)
+        with get_cursor() as cur:
+            cur.execute("""
+                INSERT INTO trustee_votes(motion_id, trustee_id, trustee_name_text, vote, created_at)
+                VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
+            """, [motion_id, trustee_id, trustee_name, normalize_vote(vote.get("vote"))])
+
+    return motion_id
 
 
-def insert_motion(cur, document_id, fallback_meeting_date, motion):
-    meeting_date = clean_value(motion.get("meeting_date")) or fallback_meeting_date
-
-    cur.execute("""
-        INSERT INTO motions (
-            document_id,
-            meeting_date,
-            agenda_item_id,
-            motion_text,
-            moved_by,
-            seconded_by,
-            vote_result,
-            topic,
-            agenda_item,
-            ayes,
-            nays,
-            abstains,
-            absent,
-            topic_category,
-            consent_agenda,
-            dollar_amount,
-            vendor_or_department,
-            confidence_score,
-            source_excerpt
-        )
-        VALUES (
-            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-            %s, %s, %s, %s, %s, %s, %s, %s, %s
-        );
-    """, (
-        document_id,
-        meeting_date,
-        None,
-        clean_value(motion.get("motion_text")),
-        clean_value(motion.get("moved_by")),
-        clean_value(motion.get("seconded_by")),
-        clean_value(motion.get("vote_result")),
-        clean_value(motion.get("topic")),
-        clean_value(motion.get("agenda_item")),
-        clean_value(motion.get("ayes")),
-        clean_value(motion.get("nays")),
-        clean_value(motion.get("abstains")),
-        clean_value(motion.get("absent")),
-        clean_value(motion.get("topic_category")),
-        bool(motion.get("consent_agenda")) if motion.get("consent_agenda") is not None else False,
-        clean_value(motion.get("dollar_amount")),
-        clean_value(motion.get("vendor_or_department")),
-        motion.get("confidence_score"),
-        clean_value(motion.get("source_excerpt")),
-    ))
+def mark_status(document_id, processed, error=None):
+    with get_cursor() as cur:
+        cur.execute("""
+            INSERT INTO motion_processing_status(document_id, motion_processed, last_motion_error, updated_at)
+            VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+            ON CONFLICT (document_id) DO UPDATE SET
+                motion_processed=EXCLUDED.motion_processed,
+                last_motion_error=EXCLUDED.last_motion_error,
+                updated_at=CURRENT_TIMESTAMP
+        """, [document_id, processed, error])
 
 
-def mark_document_processed(cur, document_id, note):
-    cur.execute("""
-        UPDATE documents
-        SET motion_processed = TRUE,
-            motion_processed_at = NOW(),
-            motion_process_notes = %s
-        WHERE id = %s;
-    """, (note, document_id))
+def main(limit):
+    client = get_client()
+    with get_cursor() as cur:
+        cur.execute("""
+            SELECT d.id, d.name, d.text_content
+            FROM documents d
+            LEFT JOIN motion_processing_status s ON s.document_id=d.id
+            WHERE COALESCE(s.motion_processed,false)=false
+              AND COALESCE(d.text_content,'') <> ''
+            ORDER BY d.id
+            LIMIT %s
+        """, [limit])
+        docs = cur.fetchall()
 
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--limit", type=int, default=25)
-    args = parser.parse_args()
-
-    conn = get_conn()
-
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                ensure_motion_tracking_columns(cur)
-
-        with conn:
-            with conn.cursor() as cur:
-                docs = fetch_documents(cur, args.limit)
-
-        if not docs:
-            print("No unprocessed documents found.")
-            return
-
-        for doc_id, name, text_content, meeting_date, document_type in docs:
-            print(f"Processing document {doc_id}: {name}")
-
-            inserted_count = 0
-
-            try:
-                motions = extract_motions_with_ai(name, text_content)
-
-                with conn:
-                    with conn.cursor() as cur:
-                        for motion in motions:
-                            motion_text = clean_value(motion.get("motion_text"))
-
-                            if not motion_text:
-                                continue
-
-                            insert_motion(cur, doc_id, meeting_date, motion)
-                            inserted_count += 1
-
-                        mark_document_processed(
-                            cur,
-                            doc_id,
-                            f"completed: inserted {inserted_count} motions"
-                        )
-
-                print(f"Inserted {inserted_count} motions.")
-
-            except Exception as e:
-                error_message = str(e)[:500]
-
-                with conn:
-                    with conn.cursor() as cur:
-                        mark_document_processed(
-                            cur,
-                            doc_id,
-                            f"error: {error_message}"
-                        )
-
-                print(f"ERROR processing document {doc_id}: {error_message}")
-
-    finally:
-        conn.close()
+    for d in docs:
+        print(f"Processing document {d['id']}: {d['name']}")
+        try:
+            payload = extract_with_ai(client, d["name"], d["text_content"])
+            count = 0
+            for motion in payload.get("motions", []):
+                if insert_motion(d["id"], motion):
+                    count += 1
+            mark_status(d["id"], True)
+            print(f"Inserted {count} motions.")
+        except Exception as exc:
+            mark_status(d["id"], False, str(exc))
+            print(f"ERROR processing document {d['id']}: {exc}")
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--limit", type=int, default=25)
+    args = parser.parse_args()
+    main(args.limit)

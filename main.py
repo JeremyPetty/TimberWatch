@@ -1,950 +1,476 @@
 import os
-import html
-import subprocess
 from urllib.parse import urlencode
 
-import psycopg2
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
+from flask import Flask, request, redirect, url_for
+from psycopg2 import sql
 
-DATABASE_URL = os.environ["DATABASE_URL"]
+from db import get_cursor
+from utils import esc, fmt_date, to_int, clean_snippet, build_url, page_count
 
-app = FastAPI()
+app = Flask(__name__)
+app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "dev")
 
+PER_PAGE_OPTIONS = [25, 50, 100, 250]
 
-def get_conn():
-    return psycopg2.connect(DATABASE_URL)
+DOC_SORTS = {
+    "name": "d.name",
+    "date": "COALESCE(d.meeting_date, d.created_at)",
+    "created": "d.created_at",
+    "modified": "d.modified_at",
+    "source": "d.source_name",
+    "category": "c.category",
+}
 
-
-def esc(value):
-    return html.escape(str(value or ""), quote=True)
-
-
-def search_url(**kwargs):
-    clean = {k: v for k, v in kwargs.items() if v not in (None, "")}
-    if not clean:
-        return "/search"
-    return "/search?" + urlencode(clean)
-
-
-def get_trustee_scorecard():
-    sql = """
-        SELECT
-            t.name AS trustee_name,
-            COALESCE(SUM(x.aye_count), 0) AS ayes,
-            COALESCE(SUM(x.nay_count), 0) AS nays,
-            COALESCE(SUM(x.abstain_count), 0) AS abstains,
-            COALESCE(SUM(x.absent_count), 0) AS absents
-        FROM trustees t
-        LEFT JOIN (
-            SELECT TRIM(unnest(string_to_array(COALESCE(ayes, ''), ','))) AS trustee_name,
-                   1 AS aye_count,
-                   0 AS nay_count,
-                   0 AS abstain_count,
-                   0 AS absent_count
-            FROM motions
-            WHERE COALESCE(ayes, '') <> ''
-
-            UNION ALL
-
-            SELECT TRIM(unnest(string_to_array(COALESCE(nays, ''), ','))) AS trustee_name,
-                   0 AS aye_count,
-                   1 AS nay_count,
-                   0 AS abstain_count,
-                   0 AS absent_count
-            FROM motions
-            WHERE COALESCE(nays, '') <> ''
-
-            UNION ALL
-
-            SELECT TRIM(unnest(string_to_array(COALESCE(abstains, ''), ','))) AS trustee_name,
-                   0 AS aye_count,
-                   0 AS nay_count,
-                   1 AS abstain_count,
-                   0 AS absent_count
-            FROM motions
-            WHERE COALESCE(abstains, '') <> ''
-
-            UNION ALL
-
-            SELECT TRIM(unnest(string_to_array(COALESCE(absent, ''), ','))) AS trustee_name,
-                   0 AS aye_count,
-                   0 AS nay_count,
-                   0 AS abstain_count,
-                   1 AS absent_count
-            FROM motions
-            WHERE COALESCE(absent, '') <> ''
-        ) x
-            ON LOWER(TRIM(x.trustee_name)) = LOWER(TRIM(t.name))
-        WHERE t.is_current = TRUE
-        GROUP BY t.name, t.ward
-        ORDER BY t.ward, t.name;
-    """
-
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(sql)
-            return cur.fetchall()
-
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(sql)
-            return cur.fetchall()
+VOTE_SORTS = {
+    "trustee": "t.name",
+    "yes": "yes_votes",
+    "no": "no_votes",
+    "abstain": "abstain_votes",
+    "absent": "absent_votes",
+    "total": "total_votes",
+}
 
 
-@app.get("/", response_class=HTMLResponse)
+def layout(title: str, body: str) -> str:
+    return f"""
+<!doctype html>
+<html lang=\"en\">
+<head>
+  <meta charset=\"utf-8\">
+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
+  <title>{esc(title)} - TimberWatch</title>
+  <style>
+    body {{ font-family: Arial, sans-serif; margin: 0; background: #f6f7f8; color: #222; }}
+    header {{ background: #163024; color: white; padding: 18px 28px; }}
+    header a {{ color: white; margin-right: 18px; text-decoration: none; font-weight: bold; }}
+    main {{ padding: 24px; max-width: 1400px; margin: auto; }}
+    .card {{ background: white; border-radius: 10px; padding: 18px; margin-bottom: 18px; box-shadow: 0 1px 4px rgba(0,0,0,.08); }}
+    table {{ width: 100%; border-collapse: collapse; background: white; }}
+    th, td {{ padding: 10px; border-bottom: 1px solid #ddd; vertical-align: top; }}
+    th {{ background: #edf2ef; text-align: left; white-space: nowrap; }}
+    th a {{ color: #163024; text-decoration: none; }}
+    .muted {{ color: #666; font-size: 0.92em; }}
+    .snippet {{ color: #333; max-width: 620px; }}
+    .btn, button {{ display: inline-block; padding: 7px 10px; border-radius: 6px; background: #1f6f4a; color: white; text-decoration: none; border: 0; cursor: pointer; }}
+    .btn.secondary {{ background: #54646b; }}
+    .btn.light {{ background: #e8ece9; color: #163024; }}
+    input, select {{ padding: 8px; border: 1px solid #bbb; border-radius: 6px; }}
+    .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 14px; }}
+    .stat {{ font-size: 1.8em; font-weight: bold; }}
+    .pager {{ display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 14px; }}
+    .pill {{ display: inline-block; background: #edf2ef; border-radius: 999px; padding: 4px 9px; margin: 2px; }}
+    .danger {{ color: #8a1c1c; }}
+  </style>
+</head>
+<body>
+<header>
+  <a href=\"/\">TimberWatch</a>
+  <a href=\"/search\">Documents</a>
+  <a href=\"/motions\">Motions</a>
+  <a href=\"/trustees\">Trustees</a>
+  <a href=\"/topics\">Topics</a>
+  <a href=\"/failed-motions\">Failed Motions</a>
+</header>
+<main>{body}</main>
+</body>
+</html>
+"""
+
+
+def sort_link(path, label, sort_key, current_sort, direction, **params):
+    next_dir = "desc" if current_sort == sort_key and direction == "asc" else "asc"
+    symbol = " ▲" if current_sort == sort_key and direction == "asc" else (" ▼" if current_sort == sort_key else "")
+    params.update({"sort": sort_key, "dir": next_dir, "page": 1})
+    return f'<a href="{esc(build_url(path, **params))}">{esc(label)}{symbol}</a>'
+
+
+@app.route("/")
 def home():
-    return search()
+    with get_cursor() as cur:
+        cur.execute("SELECT COUNT(*) AS n FROM documents")
+        documents = cur.fetchone()["n"]
+        cur.execute("SELECT COUNT(*) AS n FROM motions")
+        motions = cur.fetchone()["n"]
+        cur.execute("SELECT COUNT(*) AS n FROM trustee_votes")
+        votes = cur.fetchone()["n"]
+        cur.execute("SELECT COUNT(*) AS n FROM trustees WHERE COALESCE(is_current, true)=true")
+        trustees = cur.fetchone()["n"]
+        cur.execute("""
+            SELECT category, COUNT(*) AS n
+            FROM ai_document_classifications
+            WHERE category IS NOT NULL
+            GROUP BY category
+            ORDER BY n DESC, category
+            LIMIT 10
+        """)
+        categories = cur.fetchall()
+
+    body = f"""
+    <div class=\"card\">
+      <h1>TimberWatch Dashboard</h1>
+      <p class=\"muted\">Board document search, motion tracking, trustee vote analytics, and topic patterns.</p>
+    </div>
+    <div class=\"grid\">
+      <div class=\"card\"><div class=\"stat\">{documents:,}</div><div>Documents</div></div>
+      <div class=\"card\"><div class=\"stat\">{motions:,}</div><div>Motions</div></div>
+      <div class=\"card\"><div class=\"stat\">{votes:,}</div><div>Trustee Votes</div></div>
+      <div class=\"card\"><div class=\"stat\">{trustees:,}</div><div>Current Trustees</div></div>
+    </div>
+    <div class=\"card\">
+      <h2>Top Document Categories</h2>
+      {' '.join(f'<a class="pill" href="/search?category={esc(row["category"])}">{esc(row["category"])} ({row["n"]})</a>' for row in categories) or '<span class="muted">No categories yet.</span>'}
+    </div>
+    """
+    return layout("Dashboard", body)
 
 
-@app.get("/status", response_class=HTMLResponse)
-def status():
-    try:
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT COUNT(*) FROM documents")
-                doc_count = cur.fetchone()[0]
+@app.route("/search")
+def search():
+    q = request.args.get("q", "").strip()
+    category = request.args.get("category", "").strip()
+    sort = request.args.get("sort", "date")
+    direction = request.args.get("dir", "desc")
+    page = to_int(request.args.get("page", 1), default=1, minimum=1)
+    per_page = to_int(request.args.get("per_page", 25), default=25, minimum=1, maximum=250)
+    if per_page not in PER_PAGE_OPTIONS:
+        per_page = 25
+    sort_expr = DOC_SORTS.get(sort, DOC_SORTS["date"])
+    direction_sql = "ASC" if direction == "asc" else "DESC"
+    offset = (page - 1) * per_page
 
-                cur.execute("SELECT COUNT(*) FROM motions")
-                motion_count = cur.fetchone()[0]
+    where = []
+    params = []
+    if q:
+        where.append("""(
+            d.name ILIKE %s OR
+            d.text_content ILIKE %s OR
+            COALESCE(c.category, '') ILIKE %s OR
+            COALESCE(d.source_name, '') ILIKE %s
+        )""")
+        like = f"%{q}%"
+        params.extend([like, like, like, like])
+    if category:
+        where.append("c.category = %s")
+        params.append(category)
+    where_sql = "WHERE " + " AND ".join(where) if where else ""
 
-                try:
-                    cur.execute("SELECT COUNT(*) FROM trustee_votes")
-                    trustee_vote_count = cur.fetchone()[0]
-                except Exception:
-                    trustee_vote_count = "Table not found"
+    count_sql = f"""
+        SELECT COUNT(*) AS total
+        FROM documents d
+        LEFT JOIN LATERAL (SELECT * FROM ai_document_classifications c2 WHERE c2.document_id=d.id ORDER BY c2.created_at DESC NULLS LAST LIMIT 1) c ON true
+        {where_sql}
+    """
+    data_sql = f"""
+        SELECT
+            d.id, d.name, d.url, d.source_name, d.created_at, d.modified_at, d.meeting_date,
+            c.category, c.vote_result,
+            CASE
+              WHEN %s <> '' AND d.text_content ILIKE %s THEN ts_headline('english', d.text_content, plainto_tsquery('english', %s), 'MaxWords=45, MinWords=18')
+              ELSE LEFT(COALESCE(d.text_content, ''), 360)
+            END AS snippet
+        FROM documents d
+        LEFT JOIN LATERAL (SELECT * FROM ai_document_classifications c2 WHERE c2.document_id=d.id ORDER BY c2.created_at DESC NULLS LAST LIMIT 1) c ON true
+        {where_sql}
+        ORDER BY {sort_expr} {direction_sql} NULLS LAST, d.id DESC
+        LIMIT %s OFFSET %s
+    """
+    with get_cursor() as cur:
+        cur.execute(count_sql, params)
+        total = cur.fetchone()["total"]
+        cur.execute(data_sql, [q, f"%{q}%", q] + params + [per_page, offset])
+        rows = cur.fetchall()
 
-                cur.execute("SELECT COUNT(*) FROM ai_document_classifications")
-                ai_count = cur.fetchone()[0]
-
-        return f"""
-        <html>
-        <head><title>TimberWatch Status</title></head>
-        <body>
-            <h1>TimberWatch Status</h1>
-            <p><b>Database:</b> Connected</p>
-            <p><b>Documents:</b> {doc_count}</p>
-            <p><b>Motions:</b> {motion_count}</p>
-            <p><b>Trustee Votes:</b> {trustee_vote_count}</p>
-            <p><b>AI Classifications:</b> {ai_count}</p>
-            <p><a href="/">Back to Search</a></p>
-        </body>
-        </html>
+    total_pages = page_count(total, per_page)
+    base_params = {"q": q, "category": category, "per_page": per_page, "sort": sort, "dir": direction}
+    body = f"""
+    <div class=\"card\">
+      <h1>Document Search</h1>
+      <form method=\"get\" action=\"/search\">
+        <input name=\"q\" value=\"{esc(q)}\" placeholder=\"Search documents, text, Board Policy...\" size=\"45\">
+        <input name=\"category\" value=\"{esc(category)}\" placeholder=\"Category optional\">
+        <select name=\"per_page\">
+          {''.join(f'<option value="{n}" {"selected" if n == per_page else ""}>{n} per page</option>' for n in PER_PAGE_OPTIONS)}
+        </select>
+        <button>Search</button>
+        <a class=\"btn light\" href=\"/search?q=Board+Policy\">Show all Board Policy</a>
+      </form>
+      <p class=\"muted\">Showing {len(rows):,} of {total:,} results. Page {page:,} of {total_pages:,}.</p>
+    </div>
+    <div class=\"card\">
+      <table>
+        <tr>
+          <th>{sort_link('/search','Name','name',sort,direction, q=q, category=category, per_page=per_page)}</th>
+          <th>{sort_link('/search','Date','date',sort,direction, q=q, category=category, per_page=per_page)}</th>
+          <th>{sort_link('/search','Source','source',sort,direction, q=q, category=category, per_page=per_page)}</th>
+          <th>{sort_link('/search','Category','category',sort,direction, q=q, category=category, per_page=per_page)}</th>
+          <th>Matching Text</th>
+          <th>Links</th>
+        </tr>
+    """
+    for r in rows:
+        url = r.get("url") or ""
+        body += f"""
+        <tr>
+          <td><a href=\"/documents/{r['id']}\">{esc(r['name'])}</a></td>
+          <td>{esc(fmt_date(r.get('meeting_date') or r.get('created_at')))}</td>
+          <td>{esc(r.get('source_name'))}</td>
+          <td>{esc(r.get('category'))}</td>
+          <td class=\"snippet\">{clean_snippet(r.get('snippet') or '')}</td>
+          <td>{f'<a class="btn" target="_blank" href="{esc(url)}">Open</a>' if url else ''}</td>
+        </tr>
         """
-
-    except Exception as e:
-        return f"""
-        <html>
-        <head><title>TimberWatch Status</title></head>
-        <body>
-            <h1>TimberWatch Status</h1>
-            <p style="color:red;"><b>Error:</b> {esc(e)}</p>
-            <p><a href="/">Back to Search</a></p>
-        </body>
-        </html>
-        """
-
-
-@app.get("/search", response_class=HTMLResponse)
-def search(
-    q: str = "",
-    source: str = "",
-    document_type: str = "",
-    start_date: str = "",
-    end_date: str = "",
-    trustee: str = "",
-    vote: str = "",
-    view: str = "",
-):
-    q = q.strip()
-    source = source.strip()
-    document_type = document_type.strip()
-    start_date = start_date.strip()
-    end_date = end_date.strip()
-    trustee = trustee.strip()
-    vote = vote.strip()
-    view = view.strip()
-
-    results = []
-    error = ""
-
-    dashboard = {
-        "documents": 0,
-        "motions": 0,
-        "failed_motions": 0,
-        "abstentions": 0,
-        "topics": [],
-        "trustees": [],
-        "trustee_scorecard": [],
-        "ai_classified": 0,
-        "ai_contains_votes": 0,
-        "ai_failed_unclear": 0,
-        "ai_needs_review": 0,
-        "ai_topics": [],
-    }
-
-    try:
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT COUNT(*) FROM documents")
-                dashboard["documents"] = cur.fetchone()[0]
-
-                cur.execute("SELECT COUNT(*) FROM motions")
-                dashboard["motions"] = cur.fetchone()[0]
-
-                cur.execute("""
-                    SELECT COUNT(*)
-                    FROM motions
-                    WHERE vote_result ILIKE '%failed%'
-                       OR vote_result ILIKE '%no%'
-                       OR vote_result ILIKE '%nay%'
-                """)
-                dashboard["failed_motions"] = cur.fetchone()[0]
-
-                cur.execute("""
-                    SELECT COUNT(*)
-                    FROM motions
-                    WHERE abstains IS NOT NULL
-                      AND abstains <> ''
-                """)
-                dashboard["abstentions"] = cur.fetchone()[0]
-
-                cur.execute("""
-                    SELECT topic_category, COUNT(*)
-                    FROM motions
-                    WHERE topic_category IS NOT NULL
-                      AND topic_category <> ''
-                    GROUP BY topic_category
-                    ORDER BY COUNT(*) DESC
-                    LIMIT 5
-                """)
-                dashboard["topics"] = cur.fetchall()
-
-                cur.execute("""
-                    SELECT name
-                    FROM trustees
-                    WHERE is_current = TRUE
-                    ORDER BY ward, name
-                """)
-                dashboard["trustees"] = cur.fetchall()
-
-                dashboard["trustee_scorecard"] = get_trustee_scorecard()
-
-                cur.execute("SELECT COUNT(*) FROM ai_document_classifications")
-                dashboard["ai_classified"] = cur.fetchone()[0]
-
-                cur.execute("""
-                    SELECT COUNT(*)
-                    FROM ai_document_classifications
-                    WHERE contains_vote = TRUE
-                """)
-                dashboard["ai_contains_votes"] = cur.fetchone()[0]
-
-                cur.execute("""
-                    SELECT COUNT(*)
-                    FROM ai_document_classifications
-                    WHERE vote_result IN ('Failed', 'Unclear')
-                """)
-                dashboard["ai_failed_unclear"] = cur.fetchone()[0]
-
-                cur.execute("""
-                    SELECT COUNT(*)
-                    FROM ai_document_classifications
-                    WHERE needs_human_review = TRUE
-                """)
-                dashboard["ai_needs_review"] = cur.fetchone()[0]
-
-                cur.execute("""
-                    SELECT primary_topic, COUNT(*)
-                    FROM ai_document_classifications
-                    WHERE primary_topic IS NOT NULL
-                      AND primary_topic <> ''
-                    GROUP BY primary_topic
-                    ORDER BY COUNT(*) DESC
-                    LIMIT 5
-                """)
-                dashboard["ai_topics"] = cur.fetchall()
-
-                if q or source or document_type or start_date or end_date or view or trustee or vote:
-                    where_parts = []
-                    params = []
-
-                    if q:
-                        where_parts.append("""
-                            (
-                                search_vector @@ plainto_tsquery('english', %s)
-                                OR name ILIKE %s
-                                OR text_content ILIKE %s
-                            )
-                        """)
-                        params.extend([q, f"%{q}%", f"%{q}%"])
-
-                    if source:
-                        where_parts.append("source = %s")
-                        params.append(source)
-
-                    if document_type:
-                        where_parts.append("document_type = %s")
-                        params.append(document_type)
-
-                    if start_date:
-                        where_parts.append("meeting_date >= %s")
-                        params.append(start_date)
-
-                    if end_date:
-                        where_parts.append("meeting_date <= %s")
-                        params.append(end_date)
-
-                    if view == "motions":
-                        where_parts.append("""
-                            id IN (
-                                SELECT document_id
-                                FROM motions
-                            )
-                        """)
-
-                    elif view == "failed":
-                        where_parts.append("""
-                            id IN (
-                                SELECT DISTINCT document_id
-                                FROM motions
-                                WHERE vote_result ILIKE '%failed%'
-                                   OR vote_result ILIKE '%no%'
-                                   OR vote_result ILIKE '%nay%'
-                            )
-                        """)
-
-                    elif view == "abstentions":
-                        where_parts.append("""
-                            id IN (
-                                SELECT document_id
-                                FROM motions
-                                WHERE abstains IS NOT NULL
-                                  AND abstains <> ''
-                            )
-                        """)
-
-                    elif view == "documents":
-                        where_parts.append("TRUE")
-
-                    elif view == "ai_classified":
-                        where_parts.append("""
-                            id IN (
-                                SELECT document_id
-                                FROM ai_document_classifications
-                            )
-                        """)
-
-                    elif view == "ai_votes":
-                        where_parts.append("""
-                            id IN (
-                                SELECT document_id
-                                FROM ai_document_classifications
-                                WHERE contains_vote = TRUE
-                            )
-                        """)
-
-                    elif view == "ai_failed_unclear":
-                        where_parts.append("""
-                            id IN (
-                                SELECT document_id
-                                FROM ai_document_classifications
-                                WHERE vote_result IN ('Failed', 'Unclear')
-                            )
-                        """)
-
-                    elif view == "ai_review":
-                        where_parts.append("""
-                            id IN (
-                                SELECT document_id
-                                FROM ai_document_classifications
-                                WHERE needs_human_review = TRUE
-                            )
-                        """)
-
-                    if trustee and vote:
-                        if vote.lower().startswith("yes"):
-                            where_parts.append("""
-                                id IN (
-                                    SELECT document_id
-                                    FROM motions
-                                    WHERE ayes ILIKE %s
-                                )
-                            """)
-                        elif vote.lower().startswith("no"):
-                            where_parts.append("""
-                                id IN (
-                                    SELECT document_id
-                                    FROM motions
-                                    WHERE nays ILIKE %s
-                                )
-                            """)
-                        elif vote.lower().startswith("abstain"):
-                            where_parts.append("""
-                                id IN (
-                                    SELECT document_id
-                                    FROM motions
-                                    WHERE abstains ILIKE %s
-                                )
-                            """)
-                        elif vote.lower().startswith("absent"):
-                            where_parts.append("""
-                                id IN (
-                                    SELECT document_id
-                                    FROM motions
-                                    WHERE absent ILIKE %s
-                                )
-                            """)
-                        params.append(f"%{trustee}%")
-
-                    elif trustee:
-                        where_parts.append("""
-                            (
-                                text_content ILIKE %s
-                                OR id IN (
-                                    SELECT document_id
-                                    FROM motions
-                                    WHERE ayes ILIKE %s
-                                       OR nays ILIKE %s
-                                       OR abstains ILIKE %s
-                                       OR absent ILIKE %s
-                                )
-                            )
-                        """)
-                        trustee_param = f"%{trustee}%"
-                        params.extend([
-                            trustee_param,
-                            trustee_param,
-                            trustee_param,
-                            trustee_param,
-                            trustee_param,
-                        ])
-
-                    where_sql = " AND ".join(where_parts) if where_parts else "TRUE"
-                    search_query_for_rank = q if q else ""
-
-                    sql = f"""
-                        SELECT
-                            source,
-                            name,
-                            url,
-                            created,
-                            modified,
-                            meeting_date,
-                            document_type,
-                            source_url,
-                            CASE
-                                WHEN %s = '' THEN 0
-                                ELSE ts_rank(
-                                    search_vector,
-                                    plainto_tsquery('english', %s)
-                                )
-                            END AS rank,
-                            CASE
-                                WHEN %s = '' THEN coalesce(left(text_content, 350), '')
-                                ELSE ts_headline(
-                                    'english',
-                                    coalesce(text_content, ''),
-                                    plainto_tsquery('english', %s),
-                                    'StartSel=<mark>, StopSel=</mark>, MaxFragments=2, MaxWords=55, MinWords=15'
-                                )
-                            END AS match_context
-                        FROM documents
-                        WHERE {where_sql}
-                        ORDER BY
-                            rank DESC,
-                            meeting_date DESC NULLS LAST,
-                            modified DESC NULLS LAST
-                        LIMIT 100
-                    """
-
-                    final_params = [
-                        search_query_for_rank,
-                        search_query_for_rank,
-                        search_query_for_rank,
-                        search_query_for_rank,
-                    ] + params
-
-                    cur.execute(sql, final_params)
-                    results = cur.fetchall()
-
-    except Exception as e:
-        error = str(e)
-
-    html_out = f"""
-    <html>
-    <head>
-        <title>TimberWatch</title>
-        <style>
-            body {{
-                font-family: Arial, sans-serif;
-                margin: 30px;
-                background: #fafafa;
-            }}
-
-            input, select {{
-                padding: 8px;
-                font-size: 14px;
-                margin: 4px;
-            }}
-
-            button {{
-                padding: 8px 12px;
-            }}
-
-            table {{
-                border-collapse: collapse;
-                width: 100%;
-                margin-top: 20px;
-                background: white;
-            }}
-
-            th, td {{
-                border: 1px solid #ddd;
-                padding: 8px;
-                vertical-align: top;
-            }}
-
-            th {{
-                background: #f2f2f2;
-            }}
-
-            mark {{
-                background: yellow;
-                font-weight: bold;
-            }}
-
-            .small {{
-                font-size: 13px;
-                color: #555;
-            }}
-
-            .cards {{
-                display: flex;
-                gap: 12px;
-                flex-wrap: wrap;
-                margin-bottom: 20px;
-            }}
-
-            .card {{
-                background: white;
-                border: 1px solid #ddd;
-                border-radius: 8px;
-                padding: 14px;
-                min-width: 150px;
-                text-decoration: none;
-                color: black;
-                margin-bottom: 12px;
-            }}
-
-            a.card:hover, .topic-pill:hover {{
-                background: #f0f6ff;
-            }}
-
-            .card .num {{
-                font-size: 24px;
-                font-weight: bold;
-            }}
-
-            .filters {{
-                background: white;
-                border: 1px solid #ddd;
-                border-radius: 8px;
-                padding: 12px;
-            }}
-
-            .topic-pill {{
-                display: inline-block;
-                background: #e8eef7;
-                padding: 5px 8px;
-                border-radius: 12px;
-                margin: 3px;
-                text-decoration: none;
-                color: black;
-            }}
-
-            .actions a {{
-                white-space: nowrap;
-            }}
-
-            .backlog-grid {{
-                display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-                gap: 12px;
-            }}
-
-            .backlog-card {{
-                background: #fff;
-                border: 1px solid #ddd;
-                border-radius: 8px;
-                padding: 12px;
-            }}
-
-            .backlog-card h4 {{
-                margin-top: 0;
-            }}
-
-            .backlog-card ul {{
-                margin-bottom: 0;
-            }}
-        </style>
-    </head>
-
-    <body>
-        <h1>TimberWatch</h1>
-
-        <div class="cards">
-            <a class="card" href="{search_url(view='documents')}">
-                <div class="num">{dashboard['documents']}</div>
-                <div>Total Documents</div>
-            </a>
-
-            <a class="card" href="{search_url(view='motions')}">
-                <div class="num">{dashboard['motions']}</div>
-                <div>Total Motions</div>
-            </a>
-
-            <a class="card" href="{search_url(view='failed')}">
-                <div class="num">{dashboard['failed_motions']}</div>
-                <div>Failed / Nay Motions</div>
-            </a>
-
-            <a class="card" href="{search_url(view='abstentions')}">
-                <div class="num">{dashboard['abstentions']}</div>
-                <div>Abstentions</div>
-            </a>
-        </div>
-
-        <div class="cards">
-            <a class="card" href="{search_url(view='ai_classified')}">
-                <div class="num">{dashboard['ai_classified']}</div>
-                <div>AI Classified Docs</div>
-            </a>
-
-            <a class="card" href="{search_url(view='ai_votes')}">
-                <div class="num">{dashboard['ai_contains_votes']}</div>
-                <div>AI Detected Votes</div>
-            </a>
-
-            <a class="card" href="{search_url(view='ai_failed_unclear')}">
-                <div class="num">{dashboard['ai_failed_unclear']}</div>
-                <div>AI Failed / Unclear</div>
-            </a>
-
-            <a class="card" href="{search_url(view='ai_review')}">
-                <div class="num">{dashboard['ai_needs_review']}</div>
-                <div>Needs Human Review</div>
-            </a>
-        </div>
-
-        <div class="card">
-            <b>Top Motion Topics</b><br>
+    if not rows:
+        body += '<tr><td colspan="6" class="muted">No results found.</td></tr>'
+    body += "</table>"
+    body += render_pager("/search", page, total_pages, base_params)
+    body += "</div>"
+    return layout("Search", body)
+
+
+def render_pager(path, page, total_pages, params):
+    html = '<div class="pager">'
+    if page > 1:
+        p = dict(params, page=page - 1)
+        html += f'<a class="btn secondary" href="{esc(build_url(path, **p))}">Previous</a>'
+    start = max(1, page - 3)
+    end = min(total_pages, page + 3)
+    for n in range(start, end + 1):
+        p = dict(params, page=n)
+        cls = "btn" if n == page else "btn light"
+        html += f'<a class="{cls}" href="{esc(build_url(path, **p))}">{n}</a>'
+    if page < total_pages:
+        p = dict(params, page=page + 1)
+        html += f'<a class="btn secondary" href="{esc(build_url(path, **p))}">Next</a>'
+    html += '</div>'
+    return html
+
+
+@app.route("/documents/<int:document_id>")
+def document_detail(document_id):
+    with get_cursor() as cur:
+        cur.execute("SELECT * FROM documents WHERE id=%s", [document_id])
+        doc = cur.fetchone()
+        if not doc:
+            return layout("Not Found", '<div class="card">Document not found.</div>'), 404
+        cur.execute("SELECT * FROM ai_document_classifications WHERE document_id=%s ORDER BY created_at DESC NULLS LAST", [document_id])
+        classifications = cur.fetchall()
+        cur.execute("SELECT * FROM motions WHERE document_id=%s ORDER BY id", [document_id])
+        motions = cur.fetchall()
+    body = f"""
+    <div class=\"card\">
+      <h1>{esc(doc.get('name'))}</h1>
+      <p class=\"muted\">Date: {esc(fmt_date(doc.get('meeting_date') or doc.get('created_at')))} | Source: {esc(doc.get('source_name'))}</p>
+      {f'<p><a class="btn" target="_blank" href="{esc(doc.get("url"))}">Open Original</a></p>' if doc.get('url') else ''}
+    </div>
+    <div class=\"card\"><h2>Classifications</h2>
+      {' '.join(f'<span class="pill">{esc(c.get("category"))} {esc(c.get("confidence"))}</span>' for c in classifications) or '<span class="muted">No classification records.</span>'}
+    </div>
+    <div class=\"card\"><h2>Motions</h2>
     """
+    for m in motions:
+        body += f'<p><a href="/motions/{m["id"]}"><b>Motion {m["id"]}</b></a>: {esc(clean_snippet(m.get("motion_text"), 600))}</p>'
+    body += "</div>"
+    return layout(doc.get("name") or "Document", body)
 
-    if dashboard["topics"]:
-        for topic, count in dashboard["topics"]:
-            html_out += f"""
-                <a class="topic-pill" href="{search_url(q=topic)}">
-                    {esc(topic)}: {count}
-                </a>
-            """
-    else:
-        html_out += "<span class='small'>No motion topics indexed yet.</span>"
 
-    html_out += """
-        </div>
-
-        <div class="card">
-            <b>Top AI Topics</b><br>
+@app.route("/motions")
+def motions():
+    q = request.args.get("q", "").strip()
+    topic = request.args.get("topic", "").strip()
+    page = to_int(request.args.get("page", 1), 1, 1)
+    per_page = to_int(request.args.get("per_page", 25), 25, 1, 100)
+    where = []
+    params = []
+    if q:
+        where.append("m.motion_text ILIKE %s")
+        params.append(f"%{q}%")
+    if topic:
+        where.append("mt.topic = %s")
+        params.append(topic)
+    where_sql = "WHERE " + " AND ".join(where) if where else ""
+    offset = (page - 1) * per_page
+    with get_cursor() as cur:
+        cur.execute(f"SELECT COUNT(DISTINCT m.id) AS total FROM motions m LEFT JOIN motion_topics mt ON mt.motion_id=m.id {where_sql}", params)
+        total = cur.fetchone()["total"]
+        cur.execute(f"""
+            SELECT DISTINCT ON (m.id) m.id, m.motion_text, m.result, m.topic, d.name AS document_name, d.meeting_date,
+                   COUNT(tv.id) FILTER (WHERE LOWER(tv.vote) IN ('yes','aye','ayes')) OVER (PARTITION BY m.id) AS yes_votes,
+                   COUNT(tv.id) FILTER (WHERE LOWER(tv.vote) IN ('no','nay','nays')) OVER (PARTITION BY m.id) AS no_votes
+            FROM motions m
+            LEFT JOIN documents d ON d.id=m.document_id
+            LEFT JOIN trustee_votes tv ON tv.motion_id=m.id
+            LEFT JOIN motion_topics mt ON mt.motion_id=m.id
+            {where_sql}
+            ORDER BY m.id DESC
+            LIMIT %s OFFSET %s
+        """, params + [per_page, offset])
+        rows = cur.fetchall()
+    total_pages = page_count(total, per_page)
+    body = f"""
+    <div class=\"card\"><h1>Motions</h1>
+      <form><input name=\"q\" value=\"{esc(q)}\" placeholder=\"Search motion text\"><input name=\"topic\" value=\"{esc(topic)}\" placeholder=\"Topic\"><button>Search</button></form>
+      <p class=\"muted\">Showing {len(rows):,} of {total:,}</p>
+    </div><div class=\"card\"><table><tr><th>ID</th><th>Date</th><th>Motion</th><th>Result</th><th>Yes</th><th>No</th><th>Document</th></tr>
     """
+    for r in rows:
+        body += f"<tr><td><a href='/motions/{r['id']}'>{r['id']}</a></td><td>{esc(fmt_date(r.get('meeting_date')))}</td><td>{esc(clean_snippet(r.get('motion_text'), 260))}</td><td>{esc(r.get('result'))}</td><td>{r.get('yes_votes',0)}</td><td>{r.get('no_votes',0)}</td><td>{esc(r.get('document_name'))}</td></tr>"
+    body += "</table>" + render_pager("/motions", page, total_pages, {"q": q, "topic": topic, "per_page": per_page}) + "</div>"
+    return layout("Motions", body)
 
-    if dashboard["ai_topics"]:
-        for topic, count in dashboard["ai_topics"]:
-            html_out += f"""
-                <a class="topic-pill" href="{search_url(q=topic)}">
-                    {esc(topic)}: {count}
-                </a>
-            """
-    else:
-        html_out += "<span class='small'>No AI topics classified yet.</span>"
 
-    html_out += """
-        </div>
-
-        <div class="card">
-            <b>Trustees</b><br>
+@app.route("/motions/<int:motion_id>")
+def motion_detail(motion_id):
+    with get_cursor() as cur:
+        cur.execute("""
+            SELECT m.*, d.name AS document_name, d.url, d.meeting_date
+            FROM motions m LEFT JOIN documents d ON d.id=m.document_id
+            WHERE m.id=%s
+        """, [motion_id])
+        m = cur.fetchone()
+        if not m:
+            return layout("Not Found", '<div class="card">Motion not found.</div>'), 404
+        cur.execute("""
+            SELECT tv.*, t.name AS trustee_name
+            FROM trustee_votes tv LEFT JOIN trustees t ON t.id=tv.trustee_id
+            WHERE tv.motion_id=%s
+            ORDER BY trustee_name
+        """, [motion_id])
+        votes = cur.fetchall()
+        cur.execute("SELECT * FROM motion_topics WHERE motion_id=%s ORDER BY confidence DESC NULLS LAST", [motion_id])
+        topics = cur.fetchall()
+        cur.execute("SELECT ms.*, t.name AS trustee_name FROM motion_sponsors ms LEFT JOIN trustees t ON t.id=ms.trustee_id WHERE ms.motion_id=%s", [motion_id])
+        sponsors = cur.fetchall()
+    body = f"""
+    <div class=\"card\"><h1>Motion {motion_id}</h1><p>{esc(m.get('motion_text'))}</p>
+      <p class=\"muted\">Result: {esc(m.get('result'))} | Date: {esc(fmt_date(m.get('meeting_date')))} | Document: {esc(m.get('document_name'))}</p>
+      {' '.join(f'<span class="pill">{esc(t.get("topic"))} {esc(t.get("confidence"))}</span>' for t in topics)}
+    </div>
+    <div class=\"card\"><h2>Sponsors</h2>{' '.join(f'<span class="pill">{esc(s.get("trustee_name") or s.get("sponsor_name"))}</span>' for s in sponsors) or '<span class="muted">No sponsor captured.</span>'}</div>
+    <div class=\"card\"><h2>Votes</h2><table><tr><th>Trustee</th><th>Vote</th></tr>
     """
-
-    if dashboard["trustees"]:
-        for (trustee_name,) in dashboard["trustees"]:
-            html_out += f"""
-                <a class="topic-pill" href="{search_url(trustee=trustee_name)}">
-                    {esc(trustee_name)}
-                </a>
-            """
-    else:
-        html_out += "<span class='small'>No trustee votes indexed yet.</span>"
-
-    html_out += """
-        </div>
-
-        <div class="card">
-            <b>Trustee Vote Scorecard</b><br><br>
-            <table>
-                <tr>
-                    <th>Trustee</th>
-                    <th>Ayes</th>
-                    <th>Nays</th>
-                    <th>Abstains</th>
-                    <th>Absents</th>
-                </tr>
-    """
-
-    if dashboard["trustee_scorecard"]:
-        for trustee_name, ayes, nays, abstains, absents in dashboard["trustee_scorecard"]:
-            html_out += f"""
-                <tr>
-                    <td><a href="{search_url(trustee=trustee_name)}">{esc(trustee_name)}</a></td>
-                    <td><a href="{search_url(trustee=trustee_name, vote='Yes')}">{ayes}</a></td>
-                    <td><a href="{search_url(trustee=trustee_name, vote='No')}">{nays}</a></td>
-                    <td><a href="{search_url(trustee=trustee_name, vote='Abstain')}">{abstains}</a></td>
-                    <td><a href="{search_url(trustee=trustee_name, vote='Absent')}">{absents}</a></td>
-                </tr>
-            """
-    else:
-        html_out += """
-                <tr>
-                    <td colspan="5" class="small">No trustee scorecard data indexed yet.</td>
-                </tr>
-        """
-
-    html_out += f"""
-            </table>
-        </div>
-
-        <form class="filters" action="/search" method="get">
-            <input
-                name="q"
-                value="{esc(q)}"
-                placeholder="Search documents..."
-                style="width:360px;"
-            >
-
-            <select name="source">
-                <option value="">All Sources</option>
-                <option value="Board Documents" {'selected' if source == 'Board Documents' else ''}>Board Documents</option>
-                <option value="BP/AP/AR" {'selected' if source == 'BP/AP/AR' else ''}>BP/AP/AR</option>
-            </select>
-
-            <select name="document_type">
-                <option value="">All Document Types</option>
-                <option value="Minutes" {'selected' if document_type == 'Minutes' else ''}>Minutes</option>
-                <option value="Agenda" {'selected' if document_type == 'Agenda' else ''}>Agenda</option>
-                <option value="Board Policy" {'selected' if document_type == 'Board Policy' else ''}>Board Policy</option>
-                <option value="Administrative Procedure" {'selected' if document_type == 'Administrative Procedure' else ''}>Administrative Procedure</option>
-                <option value="Other" {'selected' if document_type == 'Other' else ''}>Other</option>
-            </select>
-
-            <input type="date" name="start_date" value="{esc(start_date)}">
-            <input type="date" name="end_date" value="{esc(end_date)}">
-
-            <button type="submit">Search</button>
-            <a href="/" style="margin-left:10px;">Clear</a>
-        </form>
-
-        <p><a href="/status">Status</a></p>
-        <hr>
-    """
-
-    if error:
-        html_out += f"<p style='color:red;'><b>Error:</b> {esc(error)}</p>"
-
-    search_was_requested = bool(q or source or document_type or start_date or end_date or view or trustee or vote)
-
-    if search_was_requested and not results and not error:
-        html_out += "<p>No results found.</p>"
-
-    if results:
-        html_out += f"<p><b>{len(results)}</b> results found.</p>"
-        html_out += """
-        <table>
-            <tr>
-                <th>Document</th>
-                <th>Source</th>
-                <th>Type</th>
-                <th>Meeting Date</th>
-                <th>Created</th>
-                <th>Modified</th>
-                <th>Rank</th>
-                <th>Matching Text</th>
-                <th>Actions</th>
-            </tr>
-        """
-
-        for row in results:
-            (
-                row_source,
-                name,
-                url,
-                created,
-                modified,
-                meeting_date,
-                row_document_type,
-                source_url,
-                rank,
-                match_context,
-            ) = row
-
-            open_url = source_url or url or ""
-
-            if open_url:
-                actions = f"""
-                    <a href="{esc(open_url)}" target="_blank">Open Original PDF</a><br>
-                    <a href="{esc(open_url)}" download>Download</a>
-                """
-            else:
-                actions = "<span class='small'>No link available</span>"
-
-            html_out += f"""
-            <tr>
-                <td><b>{esc(name)}</b></td>
-                <td>{esc(row_source)}</td>
-                <td>{esc(row_document_type)}</td>
-                <td>{esc(meeting_date)}</td>
-                <td>{esc(created)}</td>
-                <td>{esc(modified)}</td>
-                <td>{round(rank or 0, 4)}</td>
-                <td>{match_context or ''}</td>
-                <td class="actions">{actions}</td>
-            </tr>
-            """
-
-        html_out += "</table>"
-
-    html_out += """
-        <br>
-
-        <div class="card">
-            <h3>Project Backlog / Roadmap</h3>
-
-            <div class="backlog-grid">
-                <div class="backlog-card">
-                    <h4>Current Sprint</h4>
-                    <ul>
-                        <li>Finish motion-level extraction</li>
-                        <li>Validate AI motion quality</li>
-                        <li>Improve consent agenda detection</li>
-                        <li>Improve trustee vote extraction</li>
-                        <li>Confirm scorecard counts against source documents</li>
-                    </ul>
-                </div>
-
-                <div class="backlog-card">
-                    <h4>Search Improvements</h4>
-                    <ul>
-                        <li>Search motions directly</li>
-                        <li>Search failed motions</li>
-                        <li>Search abstentions</li>
-                        <li>Search by trustee</li>
-                        <li>Improve highlighted snippets</li>
-                        <li>Add motion-specific result cards</li>
-                    </ul>
-                </div>
-
-                <div class="backlog-card">
-                    <h4>Download Cart</h4>
-                    <ul>
-                        <li>Add checkbox next to each result</li>
-                        <li>Add selected documents to cart</li>
-                        <li>Keep cart across multiple searches</li>
-                        <li>View and remove cart items</li>
-                        <li>Download selected PDFs as one ZIP file</li>
-                        <li>Include manifest CSV in ZIP</li>
-                    </ul>
-                </div>
-
-                <div class="backlog-card">
-                    <h4>Trustee Analytics</h4>
-                    <ul>
-                        <li>Trustee profile pages</li>
-                        <li>Consensus scores</li>
-                        <li>Trustee influence scores</li>
-                        <li>Rare dissent tracker</li>
-                        <li>Voting alliance patterns</li>
-                    </ul>
-                </div>
-
-                <div class="backlog-card">
-                    <h4>Governance Analytics</h4>
-                    <ul>
-                        <li>Topic heatmaps over time</li>
-                        <li>Failed motion analysis</li>
-                        <li>Election-cycle governance shifts</li>
-                        <li>Consent agenda trend analysis</li>
-                        <li>Brown Act concern indicators</li>
-                    </ul>
-                </div>
-
-                <div class="backlog-card">
-                    <h4>Vendor / Department Tracking</h4>
-                    <ul>
-                        <li>Track vendors across motions</li>
-                        <li>Track contract dollar amounts</li>
-                        <li>Track departments tied to motions</li>
-                        <li>Build vendor timeline pages</li>
-                        <li>Flag recurring vendors and amendments</li>
-                    </ul>
-                </div>
-
-                <div class="backlog-card">
-                    <h4>AI Features</h4>
-                    <ul>
-                        <li>Motion summaries</li>
-                        <li>Motion similarity search</li>
-                        <li>AI timelines by topic</li>
-                        <li>Natural-language question answering</li>
-                        <li>Human review queue</li>
-                    </ul>
-                </div>
-            </div>
-        </div>
-
-        <div class="card">
-            <h3>Definitions</h3>
-            <p><b>Total Documents:</b> Number of indexed PDFs/documents currently in TimberWatch.</p>
-            <p><b>Total Motions:</b> Motions extracted from board minutes.</p>
-            <p><b>Failed / Nay Motions:</b> Motions containing failed or negative vote language.</p>
-            <p><b>Abstentions:</b> Trustee votes detected as abstentions.</p>
-            <p><b>AI Classified Docs:</b> Documents classified by the AI indexing script.</p>
-            <p><b>AI Detected Votes:</b> Documents where the AI detected a vote or voting-related action.</p>
-            <p><b>AI Failed / Unclear:</b> AI-classified documents with failed or unclear vote results.</p>
-            <p><b>Needs Human Review:</b> AI-classified documents flagged as needing manual verification.</p>
-            <p><b>Rank Score:</b> PostgreSQL relevance score. Higher usually means the search terms matched more strongly.</p>
-            <p><b>Matching Text:</b> Highlighted text from the source document.</p>
-        </div>
-
-    </body>
-    </html>
-    """
-
-    return html_out
+    for v in votes:
+        body += f"<tr><td>{esc(v.get('trustee_name') or v.get('trustee_name_text'))}</td><td>{esc(v.get('vote'))}</td></tr>"
+    body += "</table></div>"
+    return layout(f"Motion {motion_id}", body)
 
 
-@app.get("/run-ai")
-def run_ai(key: str):
-    admin_key = os.environ.get("ADMIN_KEY")
+@app.route("/trustees")
+def trustees():
+    sort = request.args.get("sort", "trustee")
+    direction = request.args.get("dir", "asc")
+    sort_expr = VOTE_SORTS.get(sort, VOTE_SORTS["trustee"])
+    dir_sql = "ASC" if direction == "asc" else "DESC"
+    with get_cursor() as cur:
+        cur.execute(f"""
+            SELECT t.id, t.name, t.ward, t.is_current,
+                   COUNT(tv.id) AS total_votes,
+                   COUNT(tv.id) FILTER (WHERE LOWER(tv.vote) IN ('yes','aye','ayes')) AS yes_votes,
+                   COUNT(tv.id) FILTER (WHERE LOWER(tv.vote) IN ('no','nay','nays')) AS no_votes,
+                   COUNT(tv.id) FILTER (WHERE LOWER(tv.vote) LIKE 'abstain%%') AS abstain_votes,
+                   COUNT(tv.id) FILTER (WHERE LOWER(tv.vote) LIKE 'absent%%') AS absent_votes
+            FROM trustees t
+            LEFT JOIN trustee_votes tv ON tv.trustee_id=t.id
+            GROUP BY t.id, t.name, t.ward, t.is_current
+            ORDER BY {sort_expr} {dir_sql} NULLS LAST
+        """)
+        rows = cur.fetchall()
+    body = '<div class="card"><h1>Trustee Scorecard</h1></div><div class="card"><table><tr>'
+    for label, key in [("Trustee","trustee"),("Yes","yes"),("No","no"),("Abstain","abstain"),("Absent","absent"),("Total","total")]:
+        body += f"<th>{sort_link('/trustees', label, key, sort, direction)}</th>"
+    body += "<th>Ward</th><th>Current</th></tr>"
+    for r in rows:
+        body += f"<tr><td><a href='/trustees/{r['id']}'>{esc(r['name'])}</a></td><td>{r['yes_votes']}</td><td>{r['no_votes']}</td><td>{r['abstain_votes']}</td><td>{r['absent_votes']}</td><td>{r['total_votes']}</td><td>{esc(r.get('ward'))}</td><td>{'Yes' if r.get('is_current') else 'No'}</td></tr>"
+    body += "</table></div>"
+    return layout("Trustees", body)
 
-    if key != admin_key:
-        raise HTTPException(
-            status_code=403,
-            detail="Unauthorized"
-        )
 
-    subprocess.Popen(
-        ["python", "ai_classifier.py", "--limit", "25"]
-    )
+@app.route("/trustees/<int:trustee_id>")
+def trustee_detail(trustee_id):
+    with get_cursor() as cur:
+        cur.execute("SELECT * FROM trustees WHERE id=%s", [trustee_id])
+        t = cur.fetchone()
+        if not t:
+            return layout("Not Found", '<div class="card">Trustee not found.</div>'), 404
+        cur.execute("""
+            SELECT tv.vote, m.id AS motion_id, m.motion_text, m.result, d.meeting_date, d.name AS document_name
+            FROM trustee_votes tv
+            JOIN motions m ON m.id=tv.motion_id
+            LEFT JOIN documents d ON d.id=m.document_id
+            WHERE tv.trustee_id=%s
+            ORDER BY d.meeting_date DESC NULLS LAST, m.id DESC
+            LIMIT 250
+        """, [trustee_id])
+        votes = cur.fetchall()
+        cur.execute("""
+            SELECT other.id, other.name,
+                   COUNT(*) FILTER (WHERE LOWER(tv1.vote)=LOWER(tv2.vote)) AS agree,
+                   COUNT(*) AS together,
+                   ROUND(100.0 * COUNT(*) FILTER (WHERE LOWER(tv1.vote)=LOWER(tv2.vote)) / NULLIF(COUNT(*),0), 1) AS agreement_pct
+            FROM trustee_votes tv1
+            JOIN trustee_votes tv2 ON tv1.motion_id=tv2.motion_id AND tv1.trustee_id<>tv2.trustee_id
+            JOIN trustees other ON other.id=tv2.trustee_id
+            WHERE tv1.trustee_id=%s
+            GROUP BY other.id, other.name
+            HAVING COUNT(*) >= 3
+            ORDER BY agreement_pct DESC NULLS LAST, together DESC
+        """, [trustee_id])
+        alignment = cur.fetchall()
+    body = f"<div class='card'><h1>{esc(t.get('name'))}</h1><p class='muted'>Ward: {esc(t.get('ward'))} | Current: {'Yes' if t.get('is_current') else 'No'}</p></div>"
+    body += "<div class='card'><h2>Voting Alignment</h2><table><tr><th>Trustee</th><th>Agreement</th><th>Motions Together</th></tr>"
+    for a in alignment:
+        body += f"<tr><td>{esc(a['name'])}</td><td>{esc(a['agreement_pct'])}%</td><td>{a['together']}</td></tr>"
+    body += "</table></div>"
+    body += "<div class='card'><h2>Recent Votes</h2><table><tr><th>Date</th><th>Vote</th><th>Motion</th><th>Result</th></tr>"
+    for v in votes:
+        body += f"<tr><td>{esc(fmt_date(v.get('meeting_date')))}</td><td>{esc(v.get('vote'))}</td><td><a href='/motions/{v['motion_id']}'>{esc(clean_snippet(v.get('motion_text'), 220))}</a></td><td>{esc(v.get('result'))}</td></tr>"
+    body += "</table></div>"
+    return layout(t.get("name") or "Trustee", body)
 
-    return {
-        "status": "AI classifier started",
-        "limit": 25
-    }
+
+@app.route("/topics")
+def topics():
+    with get_cursor() as cur:
+        cur.execute("""
+            SELECT topic, COUNT(*) AS motions,
+                   COUNT(*) FILTER (WHERE LOWER(COALESCE(m.result,'')) LIKE '%%pass%%' OR LOWER(COALESCE(m.result,'')) LIKE '%%approved%%') AS passed,
+                   COUNT(*) FILTER (WHERE LOWER(COALESCE(m.result,'')) LIKE '%%fail%%' OR LOWER(COALESCE(m.result,'')) LIKE '%%denied%%') AS failed
+            FROM motion_topics mt
+            LEFT JOIN motions m ON m.id=mt.motion_id
+            GROUP BY topic
+            ORDER BY motions DESC, topic
+        """)
+        rows = cur.fetchall()
+    body = "<div class='card'><h1>Topic Analytics</h1><p class='muted'>Motion topic heatmap source table: motion_topics.</p></div><div class='card'><table><tr><th>Topic</th><th>Motions</th><th>Passed</th><th>Failed</th></tr>"
+    for r in rows:
+        body += f"<tr><td><a href='/motions?topic={esc(r['topic'])}'>{esc(r['topic'])}</a></td><td>{r['motions']}</td><td>{r['passed']}</td><td>{r['failed']}</td></tr>"
+    body += "</table></div>"
+    return layout("Topics", body)
+
+
+@app.route("/failed-motions")
+def failed_motions():
+    with get_cursor() as cur:
+        cur.execute("""
+            SELECT m.id, m.motion_text, m.result, d.name AS document_name, d.meeting_date,
+                   STRING_AGG(DISTINCT mt.topic, ', ') AS topics,
+                   COUNT(tv.id) FILTER (WHERE LOWER(tv.vote) IN ('no','nay','nays')) AS no_votes
+            FROM motions m
+            LEFT JOIN documents d ON d.id=m.document_id
+            LEFT JOIN trustee_votes tv ON tv.motion_id=m.id
+            LEFT JOIN motion_topics mt ON mt.motion_id=m.id
+            WHERE LOWER(COALESCE(m.result,'')) LIKE '%%fail%%'
+               OR LOWER(COALESCE(m.result,'')) LIKE '%%denied%%'
+               OR LOWER(COALESCE(m.result,'')) LIKE '%%not approved%%'
+            GROUP BY m.id, m.motion_text, m.result, d.name, d.meeting_date
+            ORDER BY d.meeting_date DESC NULLS LAST, m.id DESC
+        """)
+        rows = cur.fetchall()
+    body = "<div class='card'><h1>Rare Failed Motions</h1><p class='muted'>Useful for spotting topics that break consensus.</p></div><div class='card'><table><tr><th>Date</th><th>Motion</th><th>Result</th><th>No Votes</th><th>Topics</th><th>Document</th></tr>"
+    for r in rows:
+        body += f"<tr><td>{esc(fmt_date(r.get('meeting_date')))}</td><td><a href='/motions/{r['id']}'>{esc(clean_snippet(r.get('motion_text'), 300))}</a></td><td>{esc(r.get('result'))}</td><td>{r.get('no_votes')}</td><td>{esc(r.get('topics'))}</td><td>{esc(r.get('document_name'))}</td></tr>"
+    body += "</table></div>"
+    return layout("Failed Motions", body)
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)), debug=os.getenv("FLASK_DEBUG") == "1")
