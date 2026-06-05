@@ -12,6 +12,14 @@ app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "dev")
 
 PER_PAGE_OPTIONS = [25, 50, 100, 250]
 
+def safe_money(value):
+    if value is None:
+        return "Not identified"
+    try:
+        return f"${float(value):,.2f}"
+    except Exception:
+        return esc(value)
+
 DOC_SORTS = {
     "name": "d.name",
     "date": "COALESCE(d.meeting_date, d.created_at)",
@@ -354,8 +362,7 @@ def motion_detail(motion_id):
     else:
         consent_display = "Unknown"
 
-    dollar_amount = motion.get("dollar_amount")
-    dollar_display = f"${dollar_amount:,.2f}" if dollar_amount is not None else "Not identified"
+    dollar_display = safe_money(motion.get("dollar_amount"))
 
     body = f"""
     <div class="card">
@@ -368,7 +375,7 @@ def motion_detail(motion_id):
 
     <div class="card">
         <h2>Motion Text</h2>
-        <p>{esc(motion.get('motion_text'))}</p>
+        <p>{esc(motion.get('motion_text') or 'No motion text available.')}</p>
         <p>
             <strong>Moved By:</strong> {esc(motion.get('moved_by')) or 'Not identified'}<br>
             <strong>Seconded By:</strong> {esc(motion.get('seconded_by')) or 'Not identified'}
