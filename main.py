@@ -15,10 +15,25 @@ PER_PAGE_OPTIONS = [25, 50, 100, 250]
 def safe_money(value):
     if value is None:
         return "Not identified"
+
+    value_str = str(value).strip()
+
+    if value_str == "":
+        return "Not identified"
+
+    if "-" in value_str:
+        parts = value_str.split("-", 1)
+        try:
+            low = float(parts[0].replace(",", "").replace("$", "").strip())
+            high = float(parts[1].replace(",", "").replace("$", "").strip())
+            return f"${low:,.0f} - ${high:,.0f}"
+        except Exception:
+            return esc(value_str)
+
     try:
-        return f"${float(value):,.2f}"
+        return f"${float(value_str.replace(',', '').replace('$', '')):,.2f}"
     except Exception:
-        return esc(value)
+        return esc(value_str)
 
 DOC_SORTS = {
     "name": "d.name",
