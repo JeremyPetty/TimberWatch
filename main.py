@@ -358,29 +358,114 @@ def motion_detail(motion_id):
 def trustees():
     sort = request.args.get("sort", "trustee")
     direction = request.args.get("dir", "asc")
-    sort_expr = VOTE_SORTS.get(sort, VOTE_SORTS["trustee"])
+
+    sort_map = {
+        "trustee": "trustee_name",
+        "yes": "yes_votes",
+        "no": "no_votes",
+        "abstain": "abstain_votes",
+        "absent": "absent_votes",
+        "total": "total_votes",
+    }
+
+    sort_expr = sort_map.get(sort, "trustee_name")
     dir_sql = "ASC" if direction == "asc" else "DESC"
+
     with get_cursor() as cur:
         cur.execute(f"""
-            SELECT t.id, t.name, t.ward, t.is_current,
-                   COUNT(tv.id) AS total_votes,
-                   COUNT(tv.id) FILTER (WHERE LOWER(tv.vote) IN ('yes','aye','ayes')) AS yes_votes,
-                   COUNT(tv.id) FILTER (WHERE LOWER(tv.vote) IN ('no','nay','nays')) AS no_votes,
-                   COUNT(tv.id) FILTER (WHERE LOWER(tv.vote) LIKE 'abstain%%') AS abstain_votes,
-                   COUNT(tv.id) FILTER (WHERE LOWER(tv.vote) LIKE 'absent%%') AS absent_votes
-            FROM trustees t
-            LEFT JOIN trustee_votes tv ON tv.trustee_id=t.id
+            WITH normalized_votes AS (
+                SELECT
+                    tv.id,
+                    tv.motion_id,
+                    tv.vote,
+                    COALESCE(a.normalized_name, tv.trustee_name) AS trustee_name
+                FROM trustee_votes tv
+                LEFT JOIN trustee_name_aliases a
+                    ON LOWER(TRIM(tv.trustee_name)) = LOWER(TRIM(a.raw_name))
+                WHERE COALESCE(a.normalized_name, tv.trustee_name) IS NOT NULL
+                  AND COALESCE(a.normalized_name, tv.trustee_name) <> ''
+                  AND COALESCE(a.normalized_name, tv.trustee_name) <> 'All'
+            )
+            SELECT
+                t.id,
+                nv.trustee_name,
+                t.ward,
+                t.is_current,
+                COUNT(nv.id) AS total_votes,
+                COUNT(nv.id) FILTER (
+                    WHERE LOWER(nv.vote) IN ('yes','aye','ayes')
+                ) AS yes_votes,
+                COUNT(nv.id) FILTER (
+                    WHERE LOWER(nv.vote) IN ('no','nay','nays')
+                ) AS no_votes,
+                COUNT(nv.id) FILTER (
+                    WHERE LOWER(nv.vote) LIKE 'abstain%%'
+                ) AS abstain_votes,
+                COUNT(nv.id) FILTER (
+                    WHERE LOWER(nv.vote) LIKE 'absent%%'
+                ) AS absent_votes
+            FROM normalized_votes nv
+            JOIN trustees t
+                ON LOWER(TRIM(t.name)) = LOWER(TRIM(nv.trustee_name))
             WHERE COALESCE(t.is_current, false) = true
-            GROUP BY t.id, t.name, t.ward, t.is_current
+            GROUP BY
+                t.id,
+                nv.trustee_name,
+                t.ward,
+                t.is_current
+            ORDER BY {sort_expr} {dir_sql} NULLS LAST;
         """)
         rows = cur.fetchall()
-    body = '<div class="card"><h1>Trustee Scorecard</h1></div><div class="card"><table><tr>'
-    for label, key in [("Trustee","trustee"),("Yes","yes"),("No","no"),("Abstain","abstain"),("Absent","absent"),("Total","total")]:
+
+    body = """
+    <div class="card">
+        <h1>Trustee Scorecard</h1>
+    </div>
+
+    <div class="card">
+        <table>
+            <tr>
+    """
+
+    for label, key in [
+        ("Trustee", "trustee"),
+        ("Yes", "yes"),
+        ("No", "no"),
+        ("Abstain", "abstain"),
+        ("Absent", "absent"),
+        ("Total", "total"),
+    ]:
         body += f"<th>{sort_link('/trustees', label, key, sort, direction)}</th>"
+
     body += "<th>Ward</th><th>Current</th></tr>"
+
     for r in rows:
-        body += f"<tr><td><a href='/trustees/{r['id']}'>{esc(r['name'])}</a></td><td>{r['yes_votes']}</td><td>{r['no_votes']}</td><td>{r['abstain_votes']}</td><td>{r['absent_votes']}</td><td>{r['total_votes']}</td><td>{esc(r.get('ward'))}</td><td>{'Yes' if r.get('is_current') else 'No'}</td></tr>"
-    body += "</table></div>"
+        trustee_display = esc(r["trustee_name"])
+
+        trustee_cell = (
+            f"<a href='/trustees/{r['id']}'>{trustee_display}</a>"
+            if r["id"]
+            else trustee_display
+        )
+
+        body += f"""
+        <tr>
+            <td>{trustee_cell}</td>
+            <td>{r['yes_votes']}</td>
+            <td>{r['no_votes']}</td>
+            <td>{r['abstain_votes']}</td>
+            <td>{r['absent_votes']}</td>
+            <td>{r['total_votes']}</td>
+            <td>{esc(r['ward']) if r['ward'] else ''}</td>
+            <td>{"Yes" if r['is_current'] else "No"}</td>
+        </tr>
+        """
+
+    body += """
+        </table>
+    </div>
+    """
+
     return layout("Trustees", body)
 
 
