@@ -318,40 +318,57 @@ def motions():
     return layout("Motions", body)
 
 
-@app.route("/motions/<int:motion_id>")
+@app.route("/motion/<int:motion_id>")
 def motion_detail(motion_id):
-    with get_cursor() as cur:
-        cur.execute("""
-            SELECT m.*, d.name AS document_name, d.url, d.meeting_date
-            FROM motions m LEFT JOIN documents d ON d.id=m.document_id
-            WHERE m.id=%s
-        """, [motion_id])
-        m = cur.fetchone()
-        if not m:
-            return layout("Not Found", '<div class="card">Motion not found.</div>'), 404
-        cur.execute("""
-            SELECT tv.*, t.name AS trustee_name
-            FROM trustee_votes tv LEFT JOIN trustees t ON t.id=tv.trustee_id
-            WHERE tv.motion_id=%s
-            ORDER BY trustee_name
-        """, [motion_id])
-        votes = cur.fetchall()
-        cur.execute("SELECT * FROM motion_topics WHERE motion_id=%s ORDER BY confidence DESC NULLS LAST", [motion_id])
-        topics = cur.fetchall()
-        cur.execute("SELECT ms.*, t.name AS trustee_name FROM motion_sponsors ms LEFT JOIN trustees t ON t.id=ms.trustee_id WHERE ms.motion_id=%s", [motion_id])
-        sponsors = cur.fetchall()
-    body = f"""
-    <div class=\"card\"><h1>Motion {motion_id}</h1><p>{esc(m.get('motion_text'))}</p>
-      <p class=\"muted\">Result: {esc(m.get('result'))} | Date: {esc(fmt_date(m.get('meeting_date')))} | Document: {esc(m.get('document_name'))}</p>
-      {' '.join(f'<span class="pill">{esc(t.get("topic"))} {esc(t.get("confidence"))}</span>' for t in topics)}
-    </div>
-    <div class=\"card\"><h2>Sponsors</h2>{' '.join(f'<span class="pill">{esc(s.get("trustee_name") or s.get("sponsor_name"))}</span>' for s in sponsors) or '<span class="muted">No sponsor captured.</span>'}</div>
-    <div class=\"card\"><h2>Votes</h2><table><tr><th>Trustee</th><th>Vote</th></tr>
-    """
-    for v in votes:
-        body += f"<tr><td>{esc(v.get('trustee_name') or v.get('trustee_name_text'))}</td><td>{esc(v.get('vote'))}</td></tr>"
-    body += "</table></div>"
-    return layout(f"Motion {motion_id}", body)
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+
+    cur.execute("""
+        SELECT
+            m.id,
+            m.motion_text,
+            m.meeting_date,
+            m.moved_by,
+            m.seconded_by,
+            m.result,
+            m.topic_category,
+            m.consent_agenda,
+            m.dollar_amount,
+            m.vendor_or_department,
+            d.id AS document_id,
+            d.title AS document_title,
+            d.source_url
+        FROM motions m
+        LEFT JOIN documents d ON d.id = m.document_id
+        WHERE m.id = %s
+    """, (motion_id,))
+
+    motion = cur.fetchone()
+
+    if not motion:
+        cur.close()
+        conn.close()
+        return "Motion not found", 404
+
+    cur.execute("""
+        SELECT
+            trustee_name,
+            vote
+        FROM motion_votes
+        WHERE motion_id = %s
+        ORDER BY trustee_name
+    """, (motion_id,))
+
+    votes = cur.fetchall()
+
+    cur.close()
+    conn.close()
+
+    return render_template(
+        "motion_detail.html",
+        motion=motion,
+        votes=votes
+    )
 
 
 @app.route("/trustees")
