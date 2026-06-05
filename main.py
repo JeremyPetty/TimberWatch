@@ -323,18 +323,7 @@ def motion_detail(motion_id):
     with get_cursor() as cur:
         cur.execute("""
             SELECT
-                m.id,
-                m.document_id,
-                m.meeting_date,
-                m.agenda_item_id,
-                m.motion_text,
-                m.moved_by,
-                m.seconded_by,
-                m.result,
-                m.topic_category,
-                m.consent_agenda,
-                m.dollar_amount,
-                m.vendor_or_department,
+                m.*,
                 d.name AS document_name,
                 d.url AS document_url,
                 d.source_name
@@ -345,41 +334,97 @@ def motion_detail(motion_id):
         motion = cur.fetchone()
 
         if not motion:
-            return layout("Not Found", '<div class="card">Motion not found.</div>'), 404
+            return layout("Motion Not Found", '<div class="card">Motion not found.</div>'), 404
 
         cur.execute("""
             SELECT
-                COALESCE(a.normalized_name, tv.trustee_name) AS trustee_name,
+                tv.trustee_name,
                 tv.vote
             FROM trustee_votes tv
-            LEFT JOIN trustee_name_aliases a
-                ON LOWER(TRIM(tv.trustee_name)) = LOWER(TRIM(a.raw_name))
             WHERE tv.motion_id = %s
-            ORDER BY trustee_name
+            ORDER BY tv.trustee_name
         """, [motion_id])
         votes = cur.fetchall()
 
-        cur.execute("""
-            SELECT topic
-            FROM motion_topics
-            WHERE motion_id = %s
-            ORDER BY topic
-        """, [motion_id])
-        topics = cur.fetchall()
+    consent_value = motion.get("consent_agenda")
+    if consent_value is True:
+        consent_display = "Yes"
+    elif consent_value is False:
+        consent_display = "No"
+    else:
+        consent_display = "Unknown"
 
-    return render_template(
-        "motion_detail.html",
-        motion=motion,
-        votes=votes,
-        topics=topics,
-        esc=esc,
-        fmt_date=fmt_date,
-        clean_snippet=clean_snippet,
-    )
+    dollar_amount = motion.get("dollar_amount")
+    dollar_display = f"${dollar_amount:,.2f}" if dollar_amount is not None else "Not identified"
 
+    body = f"""
+    <div class="card">
+        <h1>Motion {motion['id']}</h1>
+        <p class="muted">
+            Date: {esc(fmt_date(motion.get('meeting_date')))}
+            | Result: {esc(motion.get('result'))}
+        </p>
+    </div>
+
+    <div class="card">
+        <h2>Motion Text</h2>
+        <p>{esc(motion.get('motion_text'))}</p>
+        <p>
+            <strong>Moved By:</strong> {esc(motion.get('moved_by')) or 'Not identified'}<br>
+            <strong>Seconded By:</strong> {esc(motion.get('seconded_by')) or 'Not identified'}
+        </p>
+    </div>
+
+    <div class="card">
+        <h2>Classification</h2>
+        <p><strong>Topic:</strong> {esc(motion.get('topic_category')) or 'Unclassified'}</p>
+        <p><strong>Consent Agenda:</strong> {consent_display}</p>
+        <p><strong>Dollar Amount:</strong> {esc(dollar_display)}</p>
+        <p><strong>Vendor / Department:</strong> {esc(motion.get('vendor_or_department')) or 'Not identified'}</p>
+    </div>
+
+    <div class="card">
+        <h2>Document</h2>
+        <p>
+            <strong>Document:</strong> {esc(motion.get('document_name')) or 'Not linked'}<br>
+            <strong>Source:</strong> {esc(motion.get('source_name')) or 'Not identified'}
+        </p>
+        {f'<p><a class="btn" target="_blank" href="{esc(motion.get("document_url"))}">Open Original</a></p>' if motion.get("document_url") else ''}
+    </div>
+
+    <div class="card">
+        <h2>Trustee Votes</h2>
+        <table>
+            <tr>
+                <th>Trustee</th>
+                <th>Vote</th>
+            </tr>
+    """
+
+    for v in votes:
+        body += f"""
+            <tr>
+                <td>{esc(v.get('trustee_name'))}</td>
+                <td>{esc(v.get('vote'))}</td>
+            </tr>
+        """
+
+    if not votes:
+        body += """
+            <tr>
+                <td colspan="2" class="muted">No trustee votes found for this motion.</td>
+            </tr>
+        """
+
+    body += """
+        </table>
+    </div>
+    """
+
+    return layout(f"Motion {motion_id}", body)
 
 @app.route("/motions/<int:motion_id>")
-def motion_detail_old_url(motion_id):
+def motion_detail_redirect(motion_id):
     return redirect(url_for("motion_detail", motion_id=motion_id))
 
 
