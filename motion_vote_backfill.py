@@ -33,7 +33,8 @@ def get_connection():
 
 def fetch_motions(conn, limit):
     """
-    Pull motions that do not already have vote rows.
+    Pull motions that still need result backfill.
+    This avoids reprocessing motions that already have Passed/Failed/etc.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -47,11 +48,10 @@ def fetch_motions(conn, limit):
             FROM motions m
             JOIN documents d
                 ON d.id = m.document_id
-            WHERE NOT EXISTS (
-                SELECT 1
-                FROM votes v
-                WHERE v.motion_id = m.id
-            )
+            WHERE
+                m.result IS NULL
+                OR m.result = ''
+                OR m.result = 'Unknown'
             ORDER BY m.id
             LIMIT %s;
             """,
