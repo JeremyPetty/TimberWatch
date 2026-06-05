@@ -1,7 +1,7 @@
 import os
 from urllib.parse import urlencode
 
-from flask import Flask, request, redirect, url_for
+from flask import Flask, request, redirect, url_for, render_template
 from psycopg2 import sql
 
 from db import get_cursor
@@ -268,7 +268,7 @@ def document_detail(document_id):
     <div class=\"card\"><h2>Motions</h2>
     """
     for m in motions:
-        body += f'<p><a href="/motions/{m["id"]}"><b>Motion {m["id"]}</b></a>: {esc(clean_snippet(m.get("motion_text"), 600))}</p>'
+        body += f'<p><a href="/motion/{m["id"]}"><b>Motion {m["id"]}</b></a>: {esc(clean_snippet(m.get("motion_text"), 600))}</p>'
     body += "</div>"
     return layout(doc.get("name") or "Document", body)
 
@@ -313,62 +313,74 @@ def motions():
     </div><div class=\"card\"><table><tr><th>ID</th><th>Date</th><th>Motion</th><th>Result</th><th>Yes</th><th>No</th><th>Document</th></tr>
     """
     for r in rows:
-        body += f"<tr><td><a href='/motions/{r['id']}'>{r['id']}</a></td><td>{esc(fmt_date(r.get('meeting_date')))}</td><td>{esc(clean_snippet(r.get('motion_text'), 260))}</td><td>{esc(r.get('result'))}</td><td>{r.get('yes_votes',0)}</td><td>{r.get('no_votes',0)}</td><td>{esc(r.get('document_name'))}</td></tr>"
+        body += f"<tr><td><a href='/motion/{r['id']}'>{r['id']}</a></td><td>{esc(fmt_date(r.get('meeting_date')))}</td><td>{esc(clean_snippet(r.get('motion_text'), 260))}</td><td>{esc(r.get('result'))}</td><td>{r.get('yes_votes',0)}</td><td>{r.get('no_votes',0)}</td><td>{esc(r.get('document_name'))}</td></tr>"
     body += "</table>" + render_pager("/motions", page, total_pages, {"q": q, "topic": topic, "per_page": per_page}) + "</div>"
     return layout("Motions", body)
 
 
 @app.route("/motion/<int:motion_id>")
 def motion_detail(motion_id):
-    conn = get_db_connection()
-    cur = conn.cursor(cursor_factory=RealDictCursor)
+    with get_cursor() as cur:
+        cur.execute("""
+            SELECT
+                m.id,
+                m.document_id,
+                m.meeting_date,
+                m.agenda_item_id,
+                m.motion_text,
+                m.moved_by,
+                m.seconded_by,
+                m.result,
+                m.topic_category,
+                m.consent_agenda,
+                m.dollar_amount,
+                m.vendor_or_department,
+                d.name AS document_name,
+                d.url AS document_url,
+                d.source_name
+            FROM motions m
+            LEFT JOIN documents d ON d.id = m.document_id
+            WHERE m.id = %s
+        """, [motion_id])
+        motion = cur.fetchone()
 
-    cur.execute("""
-        SELECT
-            m.id,
-            m.motion_text,
-            m.meeting_date,
-            m.moved_by,
-            m.seconded_by,
-            m.result,
-            m.topic_category,
-            m.consent_agenda,
-            m.dollar_amount,
-            m.vendor_or_department,
-            d.id AS document_id,
-            d.title AS document_title,
-            d.source_url
-        FROM motions m
-        LEFT JOIN documents d ON d.id = m.document_id
-        WHERE m.id = %s
-    """, (motion_id,))
+        if not motion:
+            return layout("Not Found", '<div class="card">Motion not found.</div>'), 404
 
-    motion = cur.fetchone()
+        cur.execute("""
+            SELECT
+                COALESCE(a.normalized_name, tv.trustee_name) AS trustee_name,
+                tv.vote
+            FROM trustee_votes tv
+            LEFT JOIN trustee_name_aliases a
+                ON LOWER(TRIM(tv.trustee_name)) = LOWER(TRIM(a.raw_name))
+            WHERE tv.motion_id = %s
+            ORDER BY trustee_name
+        """, [motion_id])
+        votes = cur.fetchall()
 
-    if not motion:
-        cur.close()
-        conn.close()
-        return "Motion not found", 404
-
-    cur.execute("""
-        SELECT
-            trustee_name,
-            vote
-        FROM motion_votes
-        WHERE motion_id = %s
-        ORDER BY trustee_name
-    """, (motion_id,))
-
-    votes = cur.fetchall()
-
-    cur.close()
-    conn.close()
+        cur.execute("""
+            SELECT topic
+            FROM motion_topics
+            WHERE motion_id = %s
+            ORDER BY topic
+        """, [motion_id])
+        topics = cur.fetchall()
 
     return render_template(
         "motion_detail.html",
         motion=motion,
-        votes=votes
+        votes=votes,
+        topics=topics,
+        esc=esc,
+        fmt_date=fmt_date,
+        clean_snippet=clean_snippet,
     )
+
+
+@app.route("/motions/<int:motion_id>")
+def motion_detail_old_url(motion_id):
+    return redirect(url_for("motion_detail", motion_id=motion_id))
 
 
 @app.route("/trustees")
@@ -524,7 +536,7 @@ def trustee_detail(trustee_id):
     body += "</table></div>"
     body += "<div class='card'><h2>Recent Votes</h2><table><tr><th>Date</th><th>Vote</th><th>Motion</th><th>Result</th></tr>"
     for v in votes:
-        body += f"<tr><td>{esc(fmt_date(v.get('meeting_date')))}</td><td>{esc(v.get('vote'))}</td><td><a href='/motions/{v['motion_id']}'>{esc(clean_snippet(v.get('motion_text'), 220))}</a></td><td>{esc(v.get('result'))}</td></tr>"
+        body += f"<tr><td>{esc(fmt_date(v.get('meeting_date')))}</td><td>{esc(v.get('vote'))}</td><td><a href='/motion/{v['motion_id']}'>{esc(clean_snippet(v.get('motion_text'), 220))}</a></td><td>{esc(v.get('result'))}</td></tr>"
     body += "</table></div>"
     return layout(t.get("name") or "Trustee", body)
 
@@ -569,7 +581,7 @@ def failed_motions():
         rows = cur.fetchall()
     body = "<div class='card'><h1>Rare Failed Motions</h1><p class='muted'>Useful for spotting topics that break consensus.</p></div><div class='card'><table><tr><th>Date</th><th>Motion</th><th>Result</th><th>No Votes</th><th>Topics</th><th>Document</th></tr>"
     for r in rows:
-        body += f"<tr><td>{esc(fmt_date(r.get('meeting_date')))}</td><td><a href='/motions/{r['id']}'>{esc(clean_snippet(r.get('motion_text'), 300))}</a></td><td>{esc(r.get('result'))}</td><td>{r.get('no_votes')}</td><td>{esc(r.get('topics'))}</td><td>{esc(r.get('document_name'))}</td></tr>"
+        body += f"<tr><td>{esc(fmt_date(r.get('meeting_date')))}</td><td><a href='/motion/{r['id']}'>{esc(clean_snippet(r.get('motion_text'), 300))}</a></td><td>{esc(r.get('result'))}</td><td>{r.get('no_votes')}</td><td>{esc(r.get('topics'))}</td><td>{esc(r.get('document_name'))}</td></tr>"
     body += "</table></div>"
     return layout("Failed Motions", body)
 
