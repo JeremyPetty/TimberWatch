@@ -76,18 +76,38 @@ def fetch_motions(conn, limit):
 def upsert_vote(cur, motion_id, trustee_name, vote):
     cur.execute(
         """
-        INSERT INTO trustee_votes (
-            motion_id,
-            trustee_name,
-            vote
-        )
-        VALUES (%s, %s, %s)
-        ON CONFLICT (motion_id, trustee_name)
-        DO UPDATE SET
-            vote = EXCLUDED.vote;
+        SELECT id
+        FROM trustee_votes
+        WHERE motion_id = %s
+          AND LOWER(TRIM(trustee_name)) = LOWER(TRIM(%s))
+        LIMIT 1;
         """,
-        (motion_id, trustee_name, vote)
+        (motion_id, trustee_name)
     )
+
+    existing = cur.fetchone()
+
+    if existing:
+        cur.execute(
+            """
+            UPDATE trustee_votes
+            SET vote = %s
+            WHERE id = %s;
+            """,
+            (vote, existing[0])
+        )
+    else:
+        cur.execute(
+            """
+            INSERT INTO trustee_votes (
+                motion_id,
+                trustee_name,
+                vote
+            )
+            VALUES (%s, %s, %s);
+            """,
+            (motion_id, trustee_name, vote)
+        )
 
 
 def main():
