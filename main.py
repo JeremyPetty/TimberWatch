@@ -370,8 +370,8 @@ def trustees():
                    COUNT(tv.id) FILTER (WHERE LOWER(tv.vote) LIKE 'absent%%') AS absent_votes
             FROM trustees t
             LEFT JOIN trustee_votes tv ON tv.trustee_id=t.id
+            WHERE COALESCE(t.is_current, false) = true
             GROUP BY t.id, t.name, t.ward, t.is_current
-            ORDER BY {sort_expr} {dir_sql} NULLS LAST
         """)
         rows = cur.fetchall()
     body = '<div class="card"><h1>Trustee Scorecard</h1></div><div class="card"><table><tr>'
