@@ -40,8 +40,8 @@ DOC_SORTS = {
     "date": "COALESCE(d.meeting_date, d.created_at)",
     "created": "d.created_at",
     "modified": "d.modified_at",
-    "source": "d.source_name",
-    "category": "c.category",
+    "source": "d.source",
+    "category": "d.document_type",
 }
 
 VOTE_SORTS = {
@@ -171,8 +171,8 @@ def search():
         where.append("""(
             d.name ILIKE %s OR
             d.text_content ILIKE %s OR
-            COALESCE(c.category, '') ILIKE %s OR
-            COALESCE(d.source_name, '') ILIKE %s
+            COALESCE(d.document_type, '') ILIKE %s OR
+            COALESCE(d.source, '') ILIKE %s
         )""")
         like = f"%{q}%"
         params.extend([like, like, like, like])
@@ -182,7 +182,7 @@ def search():
         params.append(category)
 
     if topic:
-        where.append("mt.topic = %s")
+        where.append("d.document_type = %s")
         params.append(topic)
 
     where_sql = "WHERE " + " AND ".join(where) if where else ""
@@ -207,7 +207,8 @@ def search():
             d.id,
             d.name,
             d.url,
-            d.source_name,
+            d.source,
+            d.document_type,
             d.created_at,
             d.modified_at,
             d.meeting_date,
@@ -299,8 +300,8 @@ def search():
         <tr>
           <td><a href="/documents/{r['id']}">{esc(r['name'])}</a></td>
           <td>{esc(fmt_date(r.get('meeting_date') or r.get('created_at')))}</td>
-          <td>{esc(r.get('source_name'))}</td>
-          <td>{esc(r.get('category'))}</td>
+          <td>{esc(r.get('source'))}</td>
+          <td>{esc(r.get('document_type'))}</td>
           <td class="snippet">{clean_snippet(r.get('snippet') or '')}</td>
           <td>{f'<a class="btn" target="_blank" href="{esc(url)}">Open</a>' if url else ''}</td>
         </tr>
@@ -348,7 +349,11 @@ def document_detail(document_id):
     body = f"""
     <div class=\"card\">
       <h1>{esc(doc.get('name'))}</h1>
-      <p class=\"muted\">Date: {esc(fmt_date(doc.get('meeting_date') or doc.get('created_at')))} | Source: {esc(doc.get('source_name'))}</p>
+      <p class=\"muted\">
+      Date: {esc(fmt_date(doc.get('meeting_date') or doc.get('created_at')))}
+      | Source: {esc(doc.get('source'))}
+      | Category: {esc(doc.get('document_type'))}
+    </p>
       {f'<p><a class="btn" target="_blank" href="{esc(doc.get("url"))}">Open Original</a></p>' if doc.get('url') else ''}
     </div>
     <div class=\"card\"><h2>Classifications</h2>
