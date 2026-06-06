@@ -1279,5 +1279,10 @@ def topics():
 
     return layout("Motion Topics", body)
 
+# ----- Sprint 2 -----
+from sprint2 import register_sprint2_routes
+
+register_sprint2_routes(app, get_cursor, layout)
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)), debug=os.getenv("FLASK_DEBUG") == "1")
