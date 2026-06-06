@@ -386,7 +386,6 @@ def document_detail(document_id):
             <th>Category</th>
             <th>Confidence</th>
             <th>Vote Result</th>
-            <th>Human Review</th>
           </tr>
         """
 
@@ -398,7 +397,6 @@ def document_detail(document_id):
               <td>{esc(c.get('category') or '')}</td>
               <td>{esc(c.get('classification_confidence') or c.get('confidence') or '')}</td>
               <td>{esc(c.get('vote_result') or '')}</td>
-              <td>{'Yes' if c.get('needs_human_review') else 'No'}</td>
             </tr>
             """
 
