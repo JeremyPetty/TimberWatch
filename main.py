@@ -183,7 +183,7 @@ def search():
     params.append(topic)
     
     count_sql = f"""
-        SELECT COUNT(*) AS total
+        SELECT COUNT(DISTINCT d.id) AS total
         FROM documents d
         LEFT JOIN LATERAL (SELECT * FROM ai_document_classifications c2 WHERE c2.document_id=d.id ORDER BY c2.created_at DESC NULLS LAST LIMIT 1) c ON true
         LEFT JOIN motions m ON m.document_id = d.id
@@ -191,7 +191,7 @@ def search():
         {where_sql}
     """
     data_sql = f"""
-        SELECT
+        SELECT DISTINCT ON (d.id)
             d.id, d.name, d.url, d.source_name, d.created_at, d.modified_at, d.meeting_date,
             c.category, c.vote_result,
             CASE
@@ -213,11 +213,12 @@ def search():
         rows = cur.fetchall()
 
     total_pages = page_count(total, per_page)
-    base_params = {"q": q, "category": category, "per_page": per_page, "sort": sort, "dir": direction}
+    base_params = {"q": q, "category": category, "topic": topic, "per_page": per_page, "sort": sort, "dir": direction}
     body = f"""
     <div class=\"card\">
       <h1>Document Search</h1>
       <form method=\"get\" action=\"/search\">
+        <input type=\"hidden\" name=\"topic\" value=\"{esc(topic)}\">
         <input name=\"q\" value=\"{esc(q)}\" placeholder=\"Search documents, text, Board Policy...\" size=\"45\">
         <input name=\"category\" value=\"{esc(category)}\" placeholder=\"Category optional\">
         <select name=\"per_page\">
