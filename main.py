@@ -176,11 +176,12 @@ def search():
     if category:
         where.append("c.category = %s")
         params.append(category)
-    where_sql = "WHERE " + " AND ".join(where) if where else ""
 
     if topic:
         where.append("mt.topic = %s")
         params.append(topic)
+
+    where_sql = "WHERE " + " AND ".join(where) if where else ""
     
     count_sql = f"""
         SELECT COUNT(DISTINCT d.id) AS total
@@ -634,11 +635,12 @@ def topics():
         """)
         topic_rows = cur.fetchall()
 
-    html_out = page_header("Motion Topics")
-
-    html_out += """
+    body = """
     <div class="card">
-        <h2>Motion Topics</h2>
+        <h1>Motion Topics</h1>
+    </div>
+
+    <div class="card">
         <table>
             <tr>
                 <th>Topic</th>
@@ -647,22 +649,25 @@ def topics():
             </tr>
     """
 
-    for topic, motion_count, avg_confidence in topic_rows:
-        html_out += f"""
+    for r in topic_rows:
+        topic = r.get("topic")
+        body += f"""
             <tr>
                 <td><a href="/search?topic={esc(topic)}">{esc(topic)}</a></td>
-                <td>{motion_count}</td>
-                <td>{avg_confidence}</td>
+                <td>{r.get("motion_count")}</td>
+                <td>{r.get("avg_confidence")}</td>
             </tr>
         """
 
-    html_out += """
+    if not topic_rows:
+        body += '<tr><td colspan="3" class="muted">No topics found.</td></tr>'
+
+    body += """
         </table>
     </div>
     """
 
-    html_out += page_footer()
-    return html_out
+    return layout("Motion Topics", body)
 
 @app.route("/failed-motions")
 def failed_motions():
