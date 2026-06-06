@@ -179,8 +179,8 @@ def search():
     where_sql = "WHERE " + " AND ".join(where) if where else ""
 
     if topic:
-    where.append("mt.topic = %s")
-    params.append(topic)
+        where.append("mt.topic = %s")
+        params.append(topic)
     
     count_sql = f"""
         SELECT COUNT(DISTINCT d.id) AS total
