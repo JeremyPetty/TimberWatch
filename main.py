@@ -336,27 +336,73 @@ def document_detail(document_id):
         doc = cur.fetchone()
         if not doc:
             return layout("Not Found", '<div class="card">Document not found.</div>'), 404
-        cur.execute("SELECT * FROM ai_document_classifications WHERE document_id=%s ORDER BY created_at DESC NULLS LAST", [document_id])
+
+        cur.execute("""
+            SELECT *
+            FROM ai_document_classifications
+            WHERE document_id=%s
+            ORDER BY created_at DESC NULLS LAST
+        """, [document_id])
         classifications = cur.fetchall()
+
         cur.execute("SELECT * FROM motions WHERE document_id=%s ORDER BY id", [document_id])
         motions = cur.fetchall()
+
     body = f"""
-    <div class=\"card\">
+    <div class="card">
       <h1>{esc(doc.get('name'))}</h1>
-      <p class=\"muted\">
-      Date: {esc(fmt_date(doc.get('meeting_date') or doc.get('created_at')))}
-      | Source: {esc(doc.get('source'))}
-      | Category: {esc(doc.get('document_type'))}
-    </p>
+      <p class="muted">
+        Date: {esc(fmt_date(doc.get('meeting_date') or doc.get('created_at')))}
+        | Source: {esc(doc.get('source'))}
+        | Category: {esc(doc.get('document_type'))}
+      </p>
       {f'<p><a class="btn" target="_blank" href="{esc(doc.get("url"))}">Open Original</a></p>' if doc.get('url') else ''}
     </div>
-    <div class=\"card\"><h2>Classifications</h2>
-      {' '.join(f'<span class="pill">{esc(c.get("category"))} {esc(c.get("confidence"))}</span>' for c in classifications) or '<span class="muted">No classification records.</span>'}
-    </div>
-    <div class=\"card\"><h2>Motions</h2>
     """
+
+    body += """
+    <div class="card">
+      <h2>Classification</h2>
+    """
+
+    if classifications:
+        body += """
+        <table>
+          <tr>
+            <th>Category</th>
+            <th>Confidence</th>
+            <th>Vote Result</th>
+            <th>Created</th>
+          </tr>
+        """
+
+        for c in classifications:
+            body += f"""
+            <tr>
+              <td>{esc(c.get('category') or 'Unclassified')}</td>
+              <td>{esc(c.get('confidence') or '')}</td>
+              <td>{esc(c.get('vote_result') or '')}</td>
+              <td>{esc(fmt_date(c.get('created_at')))}</td>
+            </tr>
+            """
+
+        body += "</table>"
+    else:
+        body += '<p class="muted">No classification records found for this document.</p>'
+
+    body += "</div>"
+
+    body += """
+    <div class="card">
+      <h2>Motions</h2>
+    """
+
     for m in motions:
         body += f'<p><a href="/motion/{m["id"]}"><b>Motion {m["id"]}</b></a>: {esc(clean_snippet(m.get("motion_text"), 600))}</p>'
+
+    if not motions:
+        body += '<p class="muted">No motions found for this document.</p>'
+
     body += "</div>"
     return layout(doc.get("name") or "Document", body)
 
