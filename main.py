@@ -92,7 +92,7 @@ def layout(title: str, body: str) -> str:
   <a href=\"/motions\">Motions</a>
   <a href=\"/trustees\">Trustees</a>
   <a href=\"/topics\">Topics</a>
-  <a href=\"/failed-motions\">Failed Motions</a>
+  <a href=\"/failed_motions\">Failed Motions</a>
 </header>
 <main>{body}</main>
 </body>
