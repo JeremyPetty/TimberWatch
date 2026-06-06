@@ -178,19 +178,11 @@ def search():
         params.extend([like, like, like, like])
 
     if category:
-        where.append("COALESCE(d.document_type, '') = %s")
+        where.append("d.document_type = %s")
         params.append(category)
 
     if topic:
-        where.append("""
-            EXISTS (
-                SELECT 1
-                FROM motions m_topic
-                JOIN motion_topics mt_topic ON mt_topic.motion_id = m_topic.id
-                WHERE m_topic.document_id = d.id
-                  AND mt_topic.topic = %s
-            )
-        """)
+        where.append("mt.topic = %s")
         params.append(topic)
 
     where_sql = "WHERE " + " AND ".join(where) if where else ""
@@ -198,6 +190,15 @@ def search():
     count_sql = f"""
         SELECT COUNT(DISTINCT d.id) AS total
         FROM documents d
+        LEFT JOIN LATERAL (
+            SELECT *
+            FROM ai_document_classifications c2
+            WHERE c2.document_id = d.id
+            ORDER BY c2.created_at DESC NULLS LAST
+            LIMIT 1
+        ) c ON true
+        LEFT JOIN motions m ON m.document_id = d.id
+        LEFT JOIN motion_topics mt ON mt.motion_id = m.id
         {where_sql}
     """
 
@@ -211,6 +212,8 @@ def search():
             d.created_at,
             d.modified_at,
             d.meeting_date,
+            c.category,
+            c.vote_result,
             CASE
               WHEN %s <> '' AND d.text_content ILIKE %s
               THEN ts_headline(
@@ -222,21 +225,32 @@ def search():
               ELSE LEFT(COALESCE(d.text_content, ''), 360)
             END AS snippet
         FROM documents d
-        {where_sql}
+        LEFT JOIN LATERAL (
+            SELECT *
+            FROM ai_document_classifications c2
+            WHERE c2.document_id = d.id
+            ORDER BY c2.created_at DESC NULLS LAST
+            LIMIT 1
+        ) c ON true
+        WHERE d.id IN (
+            SELECT DISTINCT d2.id
+            FROM documents d2
+            LEFT JOIN LATERAL (
+                SELECT *
+                FROM ai_document_classifications c3
+                WHERE c3.document_id = d2.id
+                ORDER BY c3.created_at DESC NULLS LAST
+                LIMIT 1
+            ) c ON true
+            LEFT JOIN motions m ON m.document_id = d2.id
+            LEFT JOIN motion_topics mt ON mt.motion_id = m.id
+            {where_sql.replace("d.", "d2.")}
+        )
         ORDER BY {sort_expr} {direction_sql} NULLS LAST, d.id DESC
         LIMIT %s OFFSET %s
     """
 
     with get_cursor() as cur:
-        cur.execute("""
-            SELECT DISTINCT d.document_type AS category
-            FROM documents d
-            WHERE d.document_type IS NOT NULL
-              AND TRIM(d.document_type) <> ''
-            ORDER BY d.document_type
-        """)
-        categories = [r["category"] for r in cur.fetchall()]
-
         cur.execute(count_sql, params)
         total = cur.fetchone()["total"]
 
@@ -253,26 +267,17 @@ def search():
         "dir": direction,
     }
 
-    category_options = ''.join(
-        f'<option value="{esc(c)}" {"selected" if c == category else ""}>{esc(c)}</option>'
-        for c in categories
-    )
-
     body = f"""
     <div class="card">
       <h1>Document Search</h1>
       <form method="get" action="/search">
         <input type="hidden" name="topic" value="{esc(topic)}">
         <input name="q" value="{esc(q)}" placeholder="Search documents, text, Board Policy..." size="45">
-        <select name="category">
-          <option value="">All categories</option>
-          {category_options}
-        </select>
+        <input name="category" value="{esc(category)}" placeholder="Category optional">
         <select name="per_page">
           {''.join(f'<option value="{n}" {"selected" if n == per_page else ""}>{n} per page</option>' for n in PER_PAGE_OPTIONS)}
         </select>
         <button>Search</button>
-        {f'<a class="btn light" href="/search">Clear</a>' if q or category or topic else ''}
       </form>
       <p class="muted">Showing {len(rows):,} of {total:,} results. Page {page:,} of {total_pages:,}.</p>
     </div>
@@ -280,10 +285,10 @@ def search():
     <div class="card">
       <table>
         <tr>
-          <th>{sort_link('/search', 'Name', 'name', sort, direction, **base_params)}</th>
-          <th>{sort_link('/search', 'Date', 'date', sort, direction, **base_params)}</th>
-          <th>{sort_link('/search', 'Source', 'source', sort, direction, **base_params)}</th>
-          <th>{sort_link('/search', 'Category', 'category', sort, direction, **base_params)}</th>
+          <th>Name</th>
+          <th>Date</th>
+          <th>Source</th>
+          <th>Category</th>
           <th>Matching Text</th>
           <th>Links</th>
         </tr>
@@ -311,6 +316,7 @@ def search():
 
     return layout("Search", body)
 
+
 def render_pager(path, page, total_pages, params):
     html = '<div class="pager">'
     if page > 1:
@@ -332,17 +338,11 @@ def render_pager(path, page, total_pages, params):
 @app.route("/documents/<int:document_id>")
 def document_detail(document_id):
     with get_cursor() as cur:
-        cur.execute(
-            "SELECT * FROM documents WHERE id=%s",
-            [document_id]
-        )
+        cur.execute("SELECT * FROM documents WHERE id=%s", [document_id])
         doc = cur.fetchone()
 
         if not doc:
-            return layout(
-                "Not Found",
-                '<div class="card">Document not found.</div>'
-            ), 404
+            return layout("Not Found", '<div class="card">Document not found.</div>'), 404
 
         cur.execute("""
             SELECT *
@@ -362,73 +362,70 @@ def document_detail(document_id):
 
     body = f"""
     <div class="card">
-        <h1>{esc(doc.get('name'))}</h1>
-
-        <p class="muted">
-            Date: {esc(fmt_date(doc.get('meeting_date') or doc.get('created_at')))}
-            |
-            Source: {esc(doc.get('source'))}
-            |
-            Category: {esc(doc.get('document_type'))}
-        </p>
-
-        {f'<p><a class="btn" target="_blank" href="{esc(doc.get("url"))}">Open Original</a></p>' if doc.get("url") else ""}
+      <h1>{esc(doc.get('name'))}</h1>
+      <p class="muted">
+        Date: {esc(fmt_date(doc.get('meeting_date') or doc.get('created_at')))}
+        | Source: {esc(doc.get('source'))}
+        | Category: {esc(doc.get('document_type'))}
+      </p>
+      {f'<p><a class="btn" target="_blank" href="{esc(doc.get("url"))}">Open Original</a></p>' if doc.get('url') else ''}
     </div>
     """
 
-    # Classification section
     body += """
     <div class="card">
-        <h2>Classification</h2>
+      <h2>Classification</h2>
     """
 
     if classifications:
         body += """
         <table>
-            <tr>
-                <th>Category</th>
-                <th>Confidence</th>
-                <th>Vote Result</th>
-            </tr>
+          <tr>
+            <th>Document Category</th>
+            <th>Primary Topic</th>
+            <th>Category</th>
+            <th>Confidence</th>
+            <th>Vote Result</th>
+            <th>Human Review</th>
+          </tr>
         """
 
         for c in classifications:
             body += f"""
             <tr>
-                <td>{esc(c.get('category') or '')}</td>
-                <td>{esc(c.get('confidence') or '')}</td>
-                <td>{esc(c.get('vote_result') or '')}</td>
+              <td>{esc(c.get('document_category') or '')}</td>
+              <td>{esc(c.get('primary_topic') or '')}</td>
+              <td>{esc(c.get('category') or '')}</td>
+              <td>{esc(c.get('classification_confidence') or c.get('confidence') or '')}</td>
+              <td>{esc(c.get('vote_result') or '')}</td>
+              <td>{'Yes' if c.get('needs_human_review') else 'No'}</td>
             </tr>
             """
 
         body += "</table>"
-
     else:
-        body += """
-        <p class="muted">
-            No classification records found.
-        </p>
-        """
+        body += '<p class="muted">No classification records found for this document.</p>'
 
     body += "</div>"
 
-    # Motions section
     body += """
     <div class="card">
-        <h2>Motions</h2>
+      <h2>Motions</h2>
     """
 
-    for m in motions:
-        body += (
-            f'<p>'
-            f'<a href="/motion/{m["id"]}"><b>Motion {m["id"]}</b></a>: '
-            f'{esc(clean_snippet(m.get("motion_text"), 600))}'
-            f'</p>'
-        )
+    if motions:
+        for m in motions:
+            body += (
+                f'<p><a href="/motion/{m["id"]}"><b>Motion {m["id"]}</b></a>: '
+                f'{esc(clean_snippet(m.get("motion_text"), 600))}</p>'
+            )
+    else:
+        body += '<p class="muted">No motions linked to this document.</p>'
 
     body += "</div>"
 
     return layout(doc.get("name") or "Document", body)
+
 
 
 @app.route("/motions")
