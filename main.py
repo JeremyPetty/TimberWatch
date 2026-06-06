@@ -178,11 +178,11 @@ def search():
         params.extend([like, like, like, like])
 
     if category:
-        where.append("c.category = %s")
+        where.append("d.document_type = %s")
         params.append(category)
 
     if topic:
-        where.append("d.document_type = %s")
+        where.append("mt.topic = %s")
         params.append(topic)
 
     where_sql = "WHERE " + " AND ".join(where) if where else ""
