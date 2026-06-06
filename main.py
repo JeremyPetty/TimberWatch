@@ -156,14 +156,17 @@ def search():
     direction = request.args.get("dir", "desc")
     page = to_int(request.args.get("page", 1), default=1, minimum=1)
     per_page = to_int(request.args.get("per_page", 25), default=25, minimum=1, maximum=250)
+
     if per_page not in PER_PAGE_OPTIONS:
         per_page = 25
+
     sort_expr = DOC_SORTS.get(sort, DOC_SORTS["date"])
     direction_sql = "ASC" if direction == "asc" else "DESC"
     offset = (page - 1) * per_page
 
     where = []
     params = []
+
     if q:
         where.append("""(
             d.name ILIKE %s OR
@@ -173,6 +176,7 @@ def search():
         )""")
         like = f"%{q}%"
         params.extend([like, like, like, like])
+
     if category:
         where.append("c.category = %s")
         params.append(category)
@@ -182,82 +186,133 @@ def search():
         params.append(topic)
 
     where_sql = "WHERE " + " AND ".join(where) if where else ""
-    
+
     count_sql = f"""
         SELECT COUNT(DISTINCT d.id) AS total
         FROM documents d
-        LEFT JOIN LATERAL (SELECT * FROM ai_document_classifications c2 WHERE c2.document_id=d.id ORDER BY c2.created_at DESC NULLS LAST LIMIT 1) c ON true
+        LEFT JOIN LATERAL (
+            SELECT *
+            FROM ai_document_classifications c2
+            WHERE c2.document_id = d.id
+            ORDER BY c2.created_at DESC NULLS LAST
+            LIMIT 1
+        ) c ON true
         LEFT JOIN motions m ON m.document_id = d.id
         LEFT JOIN motion_topics mt ON mt.motion_id = m.id
         {where_sql}
     """
+
     data_sql = f"""
-        SELECT DISTINCT ON (d.id)
-            d.id, d.name, d.url, d.source_name, d.created_at, d.modified_at, d.meeting_date,
-            c.category, c.vote_result,
+        SELECT
+            d.id,
+            d.name,
+            d.url,
+            d.source_name,
+            d.created_at,
+            d.modified_at,
+            d.meeting_date,
+            c.category,
+            c.vote_result,
             CASE
-              WHEN %s <> '' AND d.text_content ILIKE %s THEN ts_headline('english', d.text_content, plainto_tsquery('english', %s), 'MaxWords=45, MinWords=18')
+              WHEN %s <> '' AND d.text_content ILIKE %s
+              THEN ts_headline(
+                    'english',
+                    d.text_content,
+                    plainto_tsquery('english', %s),
+                    'MaxWords=45, MinWords=18'
+              )
               ELSE LEFT(COALESCE(d.text_content, ''), 360)
             END AS snippet
         FROM documents d
-        LEFT JOIN LATERAL (SELECT * FROM ai_document_classifications c2 WHERE c2.document_id=d.id ORDER BY c2.created_at DESC NULLS LAST LIMIT 1) c ON true
-        LEFT JOIN motions m ON m.document_id = d.id
-        LEFT JOIN motion_topics mt ON mt.motion_id = m.id
-        {where_sql}
+        LEFT JOIN LATERAL (
+            SELECT *
+            FROM ai_document_classifications c2
+            WHERE c2.document_id = d.id
+            ORDER BY c2.created_at DESC NULLS LAST
+            LIMIT 1
+        ) c ON true
+        WHERE d.id IN (
+            SELECT DISTINCT d2.id
+            FROM documents d2
+            LEFT JOIN LATERAL (
+                SELECT *
+                FROM ai_document_classifications c3
+                WHERE c3.document_id = d2.id
+                ORDER BY c3.created_at DESC NULLS LAST
+                LIMIT 1
+            ) c ON true
+            LEFT JOIN motions m ON m.document_id = d2.id
+            LEFT JOIN motion_topics mt ON mt.motion_id = m.id
+            {where_sql.replace("d.", "d2.")}
+        )
         ORDER BY {sort_expr} {direction_sql} NULLS LAST, d.id DESC
         LIMIT %s OFFSET %s
     """
+
     with get_cursor() as cur:
         cur.execute(count_sql, params)
         total = cur.fetchone()["total"]
+
         cur.execute(data_sql, [q, f"%{q}%", q] + params + [per_page, offset])
         rows = cur.fetchall()
 
     total_pages = page_count(total, per_page)
-    base_params = {"q": q, "category": category, "topic": topic, "per_page": per_page, "sort": sort, "dir": direction}
+    base_params = {
+        "q": q,
+        "category": category,
+        "topic": topic,
+        "per_page": per_page,
+        "sort": sort,
+        "dir": direction,
+    }
+
     body = f"""
-    <div class=\"card\">
+    <div class="card">
       <h1>Document Search</h1>
-      <form method=\"get\" action=\"/search\">
-        <input type=\"hidden\" name=\"topic\" value=\"{esc(topic)}\">
-        <input name=\"q\" value=\"{esc(q)}\" placeholder=\"Search documents, text, Board Policy...\" size=\"45\">
-        <input name=\"category\" value=\"{esc(category)}\" placeholder=\"Category optional\">
-        <select name=\"per_page\">
+      <form method="get" action="/search">
+        <input type="hidden" name="topic" value="{esc(topic)}">
+        <input name="q" value="{esc(q)}" placeholder="Search documents, text, Board Policy..." size="45">
+        <input name="category" value="{esc(category)}" placeholder="Category optional">
+        <select name="per_page">
           {''.join(f'<option value="{n}" {"selected" if n == per_page else ""}>{n} per page</option>' for n in PER_PAGE_OPTIONS)}
         </select>
         <button>Search</button>
-        <a class=\"btn light\" href=\"/search?q=Board+Policy\">Show all Board Policy</a>
       </form>
-      <p class=\"muted\">Showing {len(rows):,} of {total:,} results. Page {page:,} of {total_pages:,}.</p>
+      <p class="muted">Showing {len(rows):,} of {total:,} results. Page {page:,} of {total_pages:,}.</p>
     </div>
-    <div class=\"card\">
+
+    <div class="card">
       <table>
         <tr>
-          <th>{sort_link('/search','Name','name',sort,direction, q=q, category=category, per_page=per_page)}</th>
-          <th>{sort_link('/search','Date','date',sort,direction, q=q, category=category, per_page=per_page)}</th>
-          <th>{sort_link('/search','Source','source',sort,direction, q=q, category=category, per_page=per_page)}</th>
-          <th>{sort_link('/search','Category','category',sort,direction, q=q, category=category, per_page=per_page)}</th>
+          <th>Name</th>
+          <th>Date</th>
+          <th>Source</th>
+          <th>Category</th>
           <th>Matching Text</th>
           <th>Links</th>
         </tr>
     """
+
     for r in rows:
         url = r.get("url") or ""
         body += f"""
         <tr>
-          <td><a href=\"/documents/{r['id']}\">{esc(r['name'])}</a></td>
+          <td><a href="/documents/{r['id']}">{esc(r['name'])}</a></td>
           <td>{esc(fmt_date(r.get('meeting_date') or r.get('created_at')))}</td>
           <td>{esc(r.get('source_name'))}</td>
           <td>{esc(r.get('category'))}</td>
-          <td class=\"snippet\">{clean_snippet(r.get('snippet') or '')}</td>
+          <td class="snippet">{clean_snippet(r.get('snippet') or '')}</td>
           <td>{f'<a class="btn" target="_blank" href="{esc(url)}">Open</a>' if url else ''}</td>
         </tr>
         """
+
     if not rows:
         body += '<tr><td colspan="6" class="muted">No results found.</td></tr>'
+
     body += "</table>"
     body += render_pager("/search", page, total_pages, base_params)
     body += "</div>"
+
     return layout("Search", body)
 
 
