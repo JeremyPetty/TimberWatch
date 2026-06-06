@@ -1219,30 +1219,6 @@ def topics():
 
     return layout("Motion Topics", body)
 
-@app.route("/failed-motions")
-def failed_motions():
-    with get_cursor() as cur:
-        cur.execute("""
-            SELECT m.id, m.motion_text, m.result, d.name AS document_name, d.meeting_date,
-                   STRING_AGG(DISTINCT mt.topic, ', ') AS topics,
-                   COUNT(tv.id) FILTER (WHERE LOWER(tv.vote) IN ('no','nay','nays')) AS no_votes
-            FROM motions m
-            LEFT JOIN documents d ON d.id=m.document_id
-            LEFT JOIN trustee_votes tv ON tv.motion_id=m.id
-            LEFT JOIN motion_topics mt ON mt.motion_id=m.id
-            WHERE LOWER(COALESCE(m.result,'')) LIKE '%%fail%%'
-               OR LOWER(COALESCE(m.result,'')) LIKE '%%denied%%'
-               OR LOWER(COALESCE(m.result,'')) LIKE '%%not approved%%'
-            GROUP BY m.id, m.motion_text, m.result, d.name, d.meeting_date
-            ORDER BY d.meeting_date DESC NULLS LAST, m.id DESC
-        """)
-        rows = cur.fetchall()
-    body = "<div class='card'><h1>Rare Failed Motions</h1><p class='muted'>Useful for spotting topics that break consensus.</p></div><div class='card'><table><tr><th>Date</th><th>Motion</th><th>Result</th><th>No Votes</th><th>Topics</th><th>Document</th></tr>"
-    for r in rows:
-        body += f"<tr><td>{esc(fmt_date(r.get('meeting_date')))}</td><td><a href='/motion/{r['id']}'>{esc(clean_snippet(r.get('motion_text'), 300))}</a></td><td>{esc(r.get('result'))}</td><td>{r.get('no_votes')}</td><td>{esc(r.get('topics'))}</td><td>{esc(r.get('document_name'))}</td></tr>"
-    body += "</table></div>"
-    return layout("Failed Motions", body)
-
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)), debug=os.getenv("FLASK_DEBUG") == "1")
