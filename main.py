@@ -713,7 +713,7 @@ def topics():
         topic = r.get("topic")
         body += f"""
             <tr>
-                <td><a href="/search?topic={esc(topic)}">{esc(topic)}</a></td>
+                <td><a href="{esc(build_url('/search', topic=topic))}">{esc(topic)}</a></td>
                 <td>{r.get("motion_count")}</td>
                 <td>{r.get("avg_confidence")}</td>
             </tr>
