@@ -92,7 +92,7 @@ def layout(title: str, body: str) -> str:
   <a href=\"/motions\">Motions</a>
   <a href=\"/trustees\">Trustees</a>
   <a href=\"/topics\">Topics</a>
-  <a href=\"/failed_motions\">Failed Motions</a>
+  <a href=\"/failed-motions\">Failed Motions</a>
 </header>
 <main>{body}</main>
 </body>
@@ -119,10 +119,12 @@ def home():
         cur.execute("SELECT COUNT(*) AS n FROM trustees WHERE COALESCE(is_current, true)=true")
         trustees = cur.fetchone()["n"]
         cur.execute("""
-            SELECT category, COUNT(*) AS n
+            SELECT
+                COALESCE(NULLIF(document_category, ''), NULLIF(category, '')) AS category,
+                COUNT(*) AS n
             FROM ai_document_classifications
-            WHERE category IS NOT NULL
-            GROUP BY category
+            WHERE COALESCE(NULLIF(document_category, ''), NULLIF(category, '')) IS NOT NULL
+            GROUP BY COALESCE(NULLIF(document_category, ''), NULLIF(category, ''))
             ORDER BY n DESC, category
             LIMIT 10
         """)
@@ -164,6 +166,10 @@ def search():
     direction_sql = "ASC" if direction == "asc" else "DESC"
     offset = (page - 1) * per_page
 
+    # Category now comes from the best available source:
+    # latest AI classification first, then documents.document_type as fallback.
+    category_expr = "COALESCE(NULLIF(c.document_category, ''), NULLIF(c.category, ''), NULLIF(d.document_type, ''))"
+
     where = []
     params = []
 
@@ -172,13 +178,16 @@ def search():
             d.name ILIKE %s OR
             d.text_content ILIKE %s OR
             COALESCE(d.document_type, '') ILIKE %s OR
-            COALESCE(d.source, '') ILIKE %s
+            COALESCE(d.source, '') ILIKE %s OR
+            COALESCE(c.document_category, '') ILIKE %s OR
+            COALESCE(c.category, '') ILIKE %s OR
+            COALESCE(c.primary_topic, '') ILIKE %s
         )""")
         like = f"%{q}%"
-        params.extend([like, like, like, like])
+        params.extend([like, like, like, like, like, like, like])
 
     if category:
-        where.append("d.document_type = %s")
+        where.append(f"{category_expr} = %s")
         params.append(category)
 
     if topic:
@@ -203,16 +212,18 @@ def search():
     """
 
     data_sql = f"""
-        SELECT
+        SELECT DISTINCT ON (d.id)
             d.id,
             d.name,
             d.url,
             d.source,
+            {category_expr} AS display_category,
             d.document_type,
             d.created_at,
             d.modified_at,
             d.meeting_date,
-            c.category,
+            c.document_category,
+            c.category AS classification_category,
             c.vote_result,
             CASE
               WHEN %s <> '' AND d.text_content ILIKE %s
@@ -232,21 +243,10 @@ def search():
             ORDER BY c2.created_at DESC NULLS LAST
             LIMIT 1
         ) c ON true
-        WHERE d.id IN (
-            SELECT DISTINCT d2.id
-            FROM documents d2
-            LEFT JOIN LATERAL (
-                SELECT *
-                FROM ai_document_classifications c3
-                WHERE c3.document_id = d2.id
-                ORDER BY c3.created_at DESC NULLS LAST
-                LIMIT 1
-            ) c ON true
-            LEFT JOIN motions m ON m.document_id = d2.id
-            LEFT JOIN motion_topics mt ON mt.motion_id = m.id
-            {where_sql.replace("d.", "d2.")}
-        )
-        ORDER BY {sort_expr} {direction_sql} NULLS LAST, d.id DESC
+        LEFT JOIN motions m ON m.document_id = d.id
+        LEFT JOIN motion_topics mt ON mt.motion_id = m.id
+        {where_sql}
+        ORDER BY d.id, {sort_expr} {direction_sql} NULLS LAST
         LIMIT %s OFFSET %s
     """
 
@@ -256,6 +256,26 @@ def search():
 
         cur.execute(data_sql, [q, f"%{q}%", q] + params + [per_page, offset])
         rows = cur.fetchall()
+
+        cur.execute("""
+            SELECT category
+            FROM (
+                SELECT DISTINCT NULLIF(TRIM(document_category), '') AS category
+                FROM ai_document_classifications
+                WHERE NULLIF(TRIM(document_category), '') IS NOT NULL
+                UNION
+                SELECT DISTINCT NULLIF(TRIM(category), '') AS category
+                FROM ai_document_classifications
+                WHERE NULLIF(TRIM(category), '') IS NOT NULL
+                UNION
+                SELECT DISTINCT NULLIF(TRIM(document_type), '') AS category
+                FROM documents
+                WHERE NULLIF(TRIM(document_type), '') IS NOT NULL
+            ) x
+            WHERE category IS NOT NULL
+            ORDER BY category
+        """)
+        category_options = cur.fetchall()
 
     total_pages = page_count(total, per_page)
     base_params = {
@@ -273,7 +293,11 @@ def search():
       <form method="get" action="/search">
         <input type="hidden" name="topic" value="{esc(topic)}">
         <input name="q" value="{esc(q)}" placeholder="Search documents, text, Board Policy..." size="45">
-        <input name="category" value="{esc(category)}" placeholder="Category optional">
+        <label for="category"><strong>Category:</strong></label>
+        <select id="category" name="category">
+          <option value="">All Categories</option>
+          {''.join(f'<option value="{esc(row["category"])}" {"selected" if row["category"] == category else ""}>{esc(row["category"])}</option>' for row in category_options)}
+        </select>
         <select name="per_page">
           {''.join(f'<option value="{n}" {"selected" if n == per_page else ""}>{n} per page</option>' for n in PER_PAGE_OPTIONS)}
         </select>
@@ -301,7 +325,7 @@ def search():
           <td><a href="/documents/{r['id']}">{esc(r['name'])}</a></td>
           <td>{esc(fmt_date(r.get('meeting_date') or r.get('created_at')))}</td>
           <td>{esc(r.get('source'))}</td>
-          <td>{esc(r.get('document_type'))}</td>
+          <td>{esc(r.get('display_category') or r.get('document_type'))}</td>
           <td class="snippet">{clean_snippet(r.get('snippet') or '')}</td>
           <td>{f'<a class="btn" target="_blank" href="{esc(url)}">Open</a>' if url else ''}</td>
         </tr>
@@ -315,7 +339,6 @@ def search():
     body += "</div>"
 
     return layout("Search", body)
-
 
 def render_pager(path, page, total_pages, params):
     html = '<div class="pager">'
@@ -333,6 +356,11 @@ def render_pager(path, page, total_pages, params):
         html += f'<a class="btn secondary" href="{esc(build_url(path, **p))}">Next</a>'
     html += '</div>'
     return html
+
+
+@app.route("/documents")
+def documents_index():
+    return redirect(url_for("search"))
 
 
 @app.route("/documents/<int:document_id>")
@@ -414,7 +442,7 @@ def document_detail(document_id):
     if motions:
         for m in motions:
             body += (
-                f'<p><a href="/motion/{m["id"]}"><b>Motion {m["id"]}</b></a>: '
+                f'<p><a href="/motions/{m["id"]}"><b>Motion {m["id"]}</b></a>: '
                 f'{esc(clean_snippet(m.get("motion_text"), 600))}</p>'
             )
     else:
@@ -441,8 +469,8 @@ def pct(numerator, denominator):
 def motions():
     q = request.args.get("q", "").strip()
     topic = request.args.get("topic", "").strip()
-    page = to_int(request.args.get("page", 1), 1, 1)
-    per_page = to_int(request.args.get("per_page", 25), 25, 1, 100)
+    page = to_int(request.args.get("page", 1), default=1, minimum=1)
+    per_page = to_int(request.args.get("per_page", 25), default=25, minimum=1, maximum=100)
 
     where = []
     params = []
@@ -452,7 +480,7 @@ def motions():
         params.append(f"%{q}%")
 
     if topic:
-        where.append("mt.topic = %s")
+        where.append("EXISTS (SELECT 1 FROM motion_topics mtf WHERE mtf.motion_id = m.id AND mtf.topic = %s)")
         params.append(topic)
 
     where_sql = "WHERE " + " AND ".join(where) if where else ""
@@ -460,9 +488,8 @@ def motions():
 
     with get_cursor() as cur:
         cur.execute(f"""
-            SELECT COUNT(DISTINCT m.id) AS total
+            SELECT COUNT(*) AS total
             FROM motions m
-            LEFT JOIN motion_topics mt ON mt.motion_id = m.id
             {where_sql}
         """, params)
         total = cur.fetchone()["total"]
@@ -472,19 +499,41 @@ def motions():
                 m.id,
                 m.motion_text,
                 m.result,
-                m.vote_margin,
                 d.name AS document_name,
-                d.meeting_date,
-                STRING_AGG(DISTINCT mt.topic, ', ') AS topics,
-                COUNT(tv.id) FILTER (WHERE LOWER(TRIM(tv.vote)) IN ('yes','aye','ayes','y')) AS yes_votes,
-                COUNT(tv.id) FILTER (WHERE LOWER(TRIM(tv.vote)) IN ('no','nay','nays','n')) AS no_votes
+                COALESCE(m.meeting_date, d.meeting_date) AS meeting_date,
+                COALESCE((
+                    SELECT STRING_AGG(DISTINCT mt.topic, ', ')
+                    FROM motion_topics mt
+                    WHERE mt.motion_id = m.id
+                ), '') AS topics,
+                COALESCE((
+                    SELECT COUNT(*)
+                    FROM trustee_votes tv
+                    WHERE tv.motion_id = m.id
+                      AND LOWER(TRIM(tv.vote)) IN ('yes','aye','ayes','y')
+                ), 0) AS yes_votes,
+                COALESCE((
+                    SELECT COUNT(*)
+                    FROM trustee_votes tv
+                    WHERE tv.motion_id = m.id
+                      AND LOWER(TRIM(tv.vote)) IN ('no','nay','nays','n')
+                ), 0) AS no_votes,
+                COALESCE((
+                    SELECT COUNT(*)
+                    FROM trustee_votes tv
+                    WHERE tv.motion_id = m.id
+                      AND LOWER(TRIM(tv.vote)) LIKE 'abstain%%'
+                ), 0) AS abstain_votes,
+                COALESCE((
+                    SELECT COUNT(*)
+                    FROM trustee_votes tv
+                    WHERE tv.motion_id = m.id
+                      AND LOWER(TRIM(tv.vote)) LIKE 'absent%%'
+                ), 0) AS absent_votes
             FROM motions m
             LEFT JOIN documents d ON d.id = m.document_id
-            LEFT JOIN trustee_votes tv ON tv.motion_id = m.id
-            LEFT JOIN motion_topics mt ON mt.motion_id = m.id
             {where_sql}
-            GROUP BY m.id, m.motion_text, m.result, m.vote_margin, d.name, d.meeting_date
-            ORDER BY d.meeting_date DESC NULLS LAST, m.id DESC
+            ORDER BY COALESCE(m.meeting_date, d.meeting_date) DESC NULLS LAST, m.id DESC
             LIMIT %s OFFSET %s
         """, params + [per_page, offset])
         rows = cur.fetchall()
@@ -494,9 +543,12 @@ def motions():
     body = f"""
     <div class="card">
       <h1>Motions</h1>
-      <form>
+      <form method="get" action="/motions">
         <input name="q" value="{esc(q)}" placeholder="Search motion text">
         <input name="topic" value="{esc(topic)}" placeholder="Topic">
+        <select name="per_page">
+          {''.join(f'<option value="{n}" {"selected" if n == per_page else ""}>{n} per page</option>' for n in [25, 50, 100])}
+        </select>
         <button>Search</button>
       </form>
       <p class="muted">Showing {len(rows):,} of {total:,}</p>
@@ -517,15 +569,18 @@ def motions():
     """
 
     for r in rows:
+        yes_votes = r.get('yes_votes') or 0
+        no_votes = r.get('no_votes') or 0
+        vote_margin = yes_votes - no_votes
         body += f"""
         <tr>
           <td><a href="/motions/{r['id']}">{r['id']}</a></td>
           <td>{esc(fmt_date(r.get('meeting_date')))}</td>
           <td>{esc(clean_snippet(r.get('motion_text'), 260))}</td>
           <td>{esc(r.get('result'))}</td>
-          <td>{esc(r.get('vote_margin'))}</td>
-          <td>{r.get('yes_votes', 0)}</td>
-          <td>{r.get('no_votes', 0)}</td>
+          <td>{vote_margin}</td>
+          <td>{yes_votes}</td>
+          <td>{no_votes}</td>
           <td>{esc(r.get('topics'))}</td>
           <td>{esc(r.get('document_name'))}</td>
         </tr>
@@ -539,7 +594,6 @@ def motions():
     body += "</div>"
 
     return layout("Motions", body)
-
 
 @app.route("/motion/<int:motion_id>")
 def old_motion_detail_redirect(motion_id):
@@ -888,7 +942,13 @@ def trustee_detail(trustee_id):
                 m.id AS motion_id,
                 m.motion_text,
                 m.result,
-                m.vote_margin,
+                (
+                    SELECT
+                        COUNT(tv2.id) FILTER (WHERE LOWER(TRIM(tv2.vote)) IN ('yes','aye','ayes','y')) -
+                        COUNT(tv2.id) FILTER (WHERE LOWER(TRIM(tv2.vote)) IN ('no','nay','nays','n'))
+                    FROM trustee_votes tv2
+                    WHERE tv2.motion_id = m.id
+                ) AS vote_margin,
                 COALESCE(m.meeting_date, d.meeting_date) AS meeting_date,
                 d.name AS document_name,
                 STRING_AGG(DISTINCT mt.topic, ', ') AS topics
@@ -897,7 +957,7 @@ def trustee_detail(trustee_id):
             LEFT JOIN documents d ON d.id = m.document_id
             LEFT JOIN motion_topics mt ON mt.motion_id = m.id
             WHERE LOWER(TRIM(nv.trustee_name)) = LOWER(TRIM(%s))
-            GROUP BY nv.vote, m.id, m.motion_text, m.result, m.vote_margin, m.meeting_date, d.meeting_date, d.name
+            GROUP BY nv.vote, m.id, m.motion_text, m.result, m.meeting_date, d.meeting_date, d.name
             ORDER BY COALESCE(m.meeting_date, d.meeting_date) DESC NULLS LAST, m.id DESC
             LIMIT 500
         """, [trustee.get("name")])
@@ -991,7 +1051,7 @@ def failed_motions():
                     m.id,
                     m.motion_text,
                     m.result,
-                    COALESCE(m.vote_margin, (vc.yes_votes - vc.no_votes)) AS margin,
+                    (COALESCE(vc.yes_votes, 0) - COALESCE(vc.no_votes, 0)) AS margin,
                     COALESCE(m.meeting_date, d.meeting_date) AS meeting_date,
                     d.name AS document_name,
                     STRING_AGG(DISTINCT mt.topic, ', ') AS topics,
@@ -1008,7 +1068,7 @@ def failed_motions():
                    OR LOWER(COALESCE(m.result,'')) LIKE '%%failed%%'
                    OR LOWER(COALESCE(m.result,'')) LIKE '%%denied%%'
                    OR LOWER(COALESCE(m.result,'')) LIKE '%%not approved%%'
-                GROUP BY m.id, m.motion_text, m.result, m.vote_margin, m.meeting_date, d.meeting_date, d.name,
+                GROUP BY m.id, m.motion_text, m.result, m.meeting_date, d.meeting_date, d.name,
                          vc.yes_votes, vc.no_votes, vc.abstain_votes, vc.absent_votes, vc.total_votes
             )
             SELECT *
@@ -1218,7 +1278,6 @@ def topics():
     """
 
     return layout("Motion Topics", body)
-
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)), debug=os.getenv("FLASK_DEBUG") == "1")
