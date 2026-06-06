@@ -151,6 +151,7 @@ def home():
 def search():
     q = request.args.get("q", "").strip()
     category = request.args.get("category", "").strip()
+    topic = request.args.get("topic", "").strip()
     sort = request.args.get("sort", "date")
     direction = request.args.get("dir", "desc")
     page = to_int(request.args.get("page", 1), default=1, minimum=1)
@@ -177,10 +178,16 @@ def search():
         params.append(category)
     where_sql = "WHERE " + " AND ".join(where) if where else ""
 
+    if topic:
+    where.append("mt.topic = %s")
+    params.append(topic)
+    
     count_sql = f"""
         SELECT COUNT(*) AS total
         FROM documents d
         LEFT JOIN LATERAL (SELECT * FROM ai_document_classifications c2 WHERE c2.document_id=d.id ORDER BY c2.created_at DESC NULLS LAST LIMIT 1) c ON true
+        LEFT JOIN motions m ON m.document_id = d.id
+        LEFT JOIN motion_topics mt ON mt.motion_id = m.id
         {where_sql}
     """
     data_sql = f"""
@@ -193,6 +200,8 @@ def search():
             END AS snippet
         FROM documents d
         LEFT JOIN LATERAL (SELECT * FROM ai_document_classifications c2 WHERE c2.document_id=d.id ORDER BY c2.created_at DESC NULLS LAST LIMIT 1) c ON true
+        LEFT JOIN motions m ON m.document_id = d.id
+        LEFT JOIN motion_topics mt ON mt.motion_id = m.id
         {where_sql}
         ORDER BY {sort_expr} {direction_sql} NULLS LAST, d.id DESC
         LIMIT %s OFFSET %s
@@ -612,21 +621,47 @@ def trustee_detail(trustee_id):
 def topics():
     with get_cursor() as cur:
         cur.execute("""
-            SELECT topic, COUNT(*) AS motions,
-                   COUNT(*) FILTER (WHERE LOWER(COALESCE(m.result,'')) LIKE '%%pass%%' OR LOWER(COALESCE(m.result,'')) LIKE '%%approved%%') AS passed,
-                   COUNT(*) FILTER (WHERE LOWER(COALESCE(m.result,'')) LIKE '%%fail%%' OR LOWER(COALESCE(m.result,'')) LIKE '%%denied%%') AS failed
+            SELECT
+                mt.topic,
+                COUNT(*) AS motion_count,
+                ROUND(AVG(mt.confidence)::numeric, 4) AS avg_confidence
             FROM motion_topics mt
-            LEFT JOIN motions m ON m.id=mt.motion_id
-            GROUP BY topic
-            ORDER BY motions DESC, topic
+            JOIN motions m
+                ON m.id = mt.motion_id
+            GROUP BY mt.topic
+            ORDER BY motion_count DESC, mt.topic;
         """)
-        rows = cur.fetchall()
-    body = "<div class='card'><h1>Topic Analytics</h1><p class='muted'>Motion topic heatmap source table: motion_topics.</p></div><div class='card'><table><tr><th>Topic</th><th>Motions</th><th>Passed</th><th>Failed</th></tr>"
-    for r in rows:
-        body += f"<tr><td><a href='/motions?topic={esc(r['topic'])}'>{esc(r['topic'])}</a></td><td>{r['motions']}</td><td>{r['passed']}</td><td>{r['failed']}</td></tr>"
-    body += "</table></div>"
-    return layout("Topics", body)
+        topic_rows = cur.fetchall()
 
+    html_out = page_header("Motion Topics")
+
+    html_out += """
+    <div class="card">
+        <h2>Motion Topics</h2>
+        <table>
+            <tr>
+                <th>Topic</th>
+                <th>Motion Count</th>
+                <th>Avg Confidence</th>
+            </tr>
+    """
+
+    for topic, motion_count, avg_confidence in topic_rows:
+        html_out += f"""
+            <tr>
+                <td><a href="/search?topic={esc(topic)}">{esc(topic)}</a></td>
+                <td>{motion_count}</td>
+                <td>{avg_confidence}</td>
+            </tr>
+        """
+
+    html_out += """
+        </table>
+    </div>
+    """
+
+    html_out += page_footer()
+    return html_out
 
 @app.route("/failed-motions")
 def failed_motions():
