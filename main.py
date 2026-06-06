@@ -178,11 +178,19 @@ def search():
         params.extend([like, like, like, like])
 
     if category:
-        where.append("d.document_type = %s")
+        where.append("COALESCE(d.document_type, '') = %s")
         params.append(category)
 
     if topic:
-        where.append("mt.topic = %s")
+        where.append("""
+            EXISTS (
+                SELECT 1
+                FROM motions m_topic
+                JOIN motion_topics mt_topic ON mt_topic.motion_id = m_topic.id
+                WHERE m_topic.document_id = d.id
+                  AND mt_topic.topic = %s
+            )
+        """)
         params.append(topic)
 
     where_sql = "WHERE " + " AND ".join(where) if where else ""
@@ -190,15 +198,6 @@ def search():
     count_sql = f"""
         SELECT COUNT(DISTINCT d.id) AS total
         FROM documents d
-        LEFT JOIN LATERAL (
-            SELECT *
-            FROM ai_document_classifications c2
-            WHERE c2.document_id = d.id
-            ORDER BY c2.created_at DESC NULLS LAST
-            LIMIT 1
-        ) c ON true
-        LEFT JOIN motions m ON m.document_id = d.id
-        LEFT JOIN motion_topics mt ON mt.motion_id = m.id
         {where_sql}
     """
 
@@ -212,8 +211,6 @@ def search():
             d.created_at,
             d.modified_at,
             d.meeting_date,
-            c.category,
-            c.vote_result,
             CASE
               WHEN %s <> '' AND d.text_content ILIKE %s
               THEN ts_headline(
@@ -225,32 +222,21 @@ def search():
               ELSE LEFT(COALESCE(d.text_content, ''), 360)
             END AS snippet
         FROM documents d
-        LEFT JOIN LATERAL (
-            SELECT *
-            FROM ai_document_classifications c2
-            WHERE c2.document_id = d.id
-            ORDER BY c2.created_at DESC NULLS LAST
-            LIMIT 1
-        ) c ON true
-        WHERE d.id IN (
-            SELECT DISTINCT d2.id
-            FROM documents d2
-            LEFT JOIN LATERAL (
-                SELECT *
-                FROM ai_document_classifications c3
-                WHERE c3.document_id = d2.id
-                ORDER BY c3.created_at DESC NULLS LAST
-                LIMIT 1
-            ) c ON true
-            LEFT JOIN motions m ON m.document_id = d2.id
-            LEFT JOIN motion_topics mt ON mt.motion_id = m.id
-            {where_sql.replace("d.", "d2.")}
-        )
+        {where_sql}
         ORDER BY {sort_expr} {direction_sql} NULLS LAST, d.id DESC
         LIMIT %s OFFSET %s
     """
 
     with get_cursor() as cur:
+        cur.execute("""
+            SELECT DISTINCT d.document_type AS category
+            FROM documents d
+            WHERE d.document_type IS NOT NULL
+              AND TRIM(d.document_type) <> ''
+            ORDER BY d.document_type
+        """)
+        categories = [r["category"] for r in cur.fetchall()]
+
         cur.execute(count_sql, params)
         total = cur.fetchone()["total"]
 
@@ -267,17 +253,26 @@ def search():
         "dir": direction,
     }
 
+    category_options = ''.join(
+        f'<option value="{esc(c)}" {"selected" if c == category else ""}>{esc(c)}</option>'
+        for c in categories
+    )
+
     body = f"""
     <div class="card">
       <h1>Document Search</h1>
       <form method="get" action="/search">
         <input type="hidden" name="topic" value="{esc(topic)}">
         <input name="q" value="{esc(q)}" placeholder="Search documents, text, Board Policy..." size="45">
-        <input name="category" value="{esc(category)}" placeholder="Category optional">
+        <select name="category">
+          <option value="">All categories</option>
+          {category_options}
+        </select>
         <select name="per_page">
           {''.join(f'<option value="{n}" {"selected" if n == per_page else ""}>{n} per page</option>' for n in PER_PAGE_OPTIONS)}
         </select>
         <button>Search</button>
+        {f'<a class="btn light" href="/search">Clear</a>' if q or category or topic else ''}
       </form>
       <p class="muted">Showing {len(rows):,} of {total:,} results. Page {page:,} of {total_pages:,}.</p>
     </div>
@@ -285,10 +280,10 @@ def search():
     <div class="card">
       <table>
         <tr>
-          <th>Name</th>
-          <th>Date</th>
-          <th>Source</th>
-          <th>Category</th>
+          <th>{sort_link('/search', 'Name', 'name', sort, direction, **base_params)}</th>
+          <th>{sort_link('/search', 'Date', 'date', sort, direction, **base_params)}</th>
+          <th>{sort_link('/search', 'Source', 'source', sort, direction, **base_params)}</th>
+          <th>{sort_link('/search', 'Category', 'category', sort, direction, **base_params)}</th>
           <th>Matching Text</th>
           <th>Links</th>
         </tr>
@@ -315,7 +310,6 @@ def search():
     body += "</div>"
 
     return layout("Search", body)
-
 
 def render_pager(path, page, total_pages, params):
     html = '<div class="pager">'
