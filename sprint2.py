@@ -12,28 +12,7 @@ def register_sprint2_routes(app, get_cursor, layout):
         return f"{(float(num or 0) / float(den)) * 100:.1f}%"
 
     CLOSED_SESSION_SQL = """
-        (
-            COALESCE(m.motion_text, '') ILIKE '%%closed session%%'
-            OR COALESCE(m.motion_text, '') ILIKE '%%reportable action%%'
-            OR COALESCE(m.motion_text, '') ILIKE '%%reported out%%'
-            OR COALESCE(m.motion_text, '') ILIKE '%%conference with legal counsel%%'
-            OR COALESCE(m.motion_text, '') ILIKE '%%litigation%%'
-            OR COALESCE(m.motion_text, '') ILIKE '%%labor negotiator%%'
-            OR COALESCE(m.motion_text, '') ILIKE '%%collective bargaining%%'
-            OR COALESCE(m.motion_text, '') ILIKE '%%public employee%%'
-            OR COALESCE(m.motion_text, '') ILIKE '%%discipline/dismissal/release%%'
-            OR COALESCE(m.motion_text, '') ILIKE '%%settlement agreement%%'
-            OR COALESCE(d.text_content, '') ILIKE '%%closed session%%'
-            OR COALESCE(d.text_content, '') ILIKE '%%reportable action%%'
-            OR COALESCE(d.text_content, '') ILIKE '%%reported out%%'
-            OR COALESCE(d.text_content, '') ILIKE '%%conference with legal counsel%%'
-            OR COALESCE(d.text_content, '') ILIKE '%%litigation%%'
-            OR COALESCE(d.text_content, '') ILIKE '%%labor negotiator%%'
-            OR COALESCE(d.text_content, '') ILIKE '%%collective bargaining%%'
-            OR COALESCE(d.text_content, '') ILIKE '%%public employee%%'
-            OR COALESCE(d.text_content, '') ILIKE '%%discipline/dismissal/release%%'
-            OR COALESCE(d.text_content, '') ILIKE '%%settlement agreement%%'
-        )
+        COALESCE(m.closed_session_related, FALSE) = TRUE
     """
 
     def sprint2_nav():
